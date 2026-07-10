@@ -22,8 +22,8 @@
 | 项目 | 要求或当前配置 |
 |---|---|
 | 主机 | Apple silicon Mac |
-| 操作系统 | macOS 26 或更高版本 |
-| 容器运行时 | Apple container（已在 CLI 1.0.0 验证；不是 Docker） |
+| 操作系统 | macOS 26；Apple 官方不支持更旧版本 |
+| 容器运行时 | [Apple container](https://github.com/apple/container)（已在 CLI 1.0.0 验证；不是 Docker） |
 | 宿主脚本 | 兼容 macOS 自带 Bash 3.2；日常可从 zsh 调用 |
 | 容器架构 | Linux ARM64，基础镜像为 `node:22-bookworm` |
 | 单容器内存 | 默认 `8192M`；可在 `ai-box` 的 `MEMORY` 变量中调整 |
@@ -32,7 +32,49 @@
 
 ## 安装
 
-先按 Apple container 的官方说明安装并确认 `container` 命令可用，然后克隆本仓库。仓库可以放在任意路径；`ai-box` 会根据脚本自身位置定位构建文件。
+### 1. 安装 Apple container
+
+Apple container 是本项目的硬性前提，不是 Docker Desktop 的兼容别名。它由 Apple 使用 Swift 开发，在 Apple silicon Mac 上把 Linux 容器作为轻量虚拟机运行，并使用 OCI 兼容镜像。
+
+- 官方仓库：[apple/container](https://github.com/apple/container)
+- 官方安装包：[apple/container Releases](https://github.com/apple/container/releases)
+- 硬件要求：Apple silicon；Intel Mac 不受支持。
+- 系统要求：macOS 26；Apple 官方明确不支持更旧的 macOS，也通常不会处理无法在 macOS 26 复现的问题。
+
+可以先确认机器满足要求：
+
+```bash
+uname -m                 # 应输出 arm64
+sw_vers -productVersion  # 应为 26.x
+```
+
+按照 Apple 官方当前推荐方式安装：
+
+1. 打开 [Releases 页面](https://github.com/apple/container/releases)，下载最新的 Apple 签名安装包。
+2. 双击 `.pkg`，按安装器提示操作；系统会要求管理员密码，以便把文件安装到 `/usr/local`。
+3. 启动 container 系统服务并验证 CLI：
+
+```bash
+container system start
+container --version
+container list
+```
+
+`container list` 即使没有运行中的容器也应能正常返回。安装完成后，后文的 `aibox start` 等价于再次执行 `container system start`。
+
+已经安装旧版本时，Apple 提供的升级方式是先停止服务，再运行安装在 `/usr/local/bin` 下的更新脚本：
+
+```bash
+container system stop
+/usr/local/bin/update-container.sh
+container system start
+```
+
+具体安装、升级或卸载行为可能随 Apple container 版本变化，请以[官方仓库说明](https://github.com/apple/container#initial-install)为准。
+
+### 2. 安装 ai-sandbox
+
+克隆本仓库。仓库可以放在任意路径；`ai-box` 会根据脚本自身位置定位构建文件。
 
 ```bash
 # 从 GitHub 页面克隆本仓库后，进入实际克隆目录

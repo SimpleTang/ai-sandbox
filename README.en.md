@@ -30,7 +30,7 @@ complying with each service's terms and with applicable law.
 ## Compatibility
 
 - An Apple silicon Mac.
-- macOS 26 or later, as required by Apple container.
+- macOS 26. Apple does not support older macOS releases for `container`.
 - [Apple container](https://github.com/apple/container) installed and available as `container`.
   CLI 1.0.0 is the currently tested version. This project does not use Docker Desktop or the
   `docker` command.
@@ -43,7 +43,57 @@ platform.
 
 ## Install
 
-Clone the repository to any location. From the clone directory, create an `aibox` symlink in a
+### 1. Install Apple container
+
+Apple container is a hard prerequisite for this project, not an alias for Docker Desktop. It is
+Apple's Swift-based tool for running Linux containers as lightweight virtual machines on Apple
+silicon Macs, using OCI-compatible images.
+
+- Official repository: [apple/container](https://github.com/apple/container)
+- Signed installer packages: [apple/container Releases](https://github.com/apple/container/releases)
+- Hardware: Apple silicon. Intel Macs are not supported.
+- Operating system: macOS 26. Apple explicitly does not support older releases and generally does
+  not address issues that cannot be reproduced on macOS 26.
+
+Check the host before installing:
+
+```bash
+uname -m                 # expected: arm64
+sw_vers -productVersion  # expected: 26.x
+```
+
+Follow Apple's current installation method:
+
+1. Open the [Releases page](https://github.com/apple/container/releases) and download the latest
+   Apple-signed installer package.
+2. Double-click the `.pkg` and follow the installer. Enter an administrator password when prompted
+   so it can install files under `/usr/local`.
+3. Start the system service and verify the CLI:
+
+```bash
+container system start
+container --version
+container list
+```
+
+`container list` should return successfully even when no containers are running. Once installed,
+the later `aibox start` command is a wrapper around `container system start`.
+
+To upgrade an existing installation using Apple's installed helper:
+
+```bash
+container system stop
+/usr/local/bin/update-container.sh
+container system start
+```
+
+Installation, upgrade, and uninstall behavior may change between Apple container releases. Treat
+the [official installation instructions](https://github.com/apple/container#initial-install) as
+authoritative.
+
+### 2. Install ai-sandbox
+
+Clone this repository to any location. From the clone directory, create an `aibox` symlink in a
 directory on your `PATH`:
 
 ```bash
@@ -338,7 +388,7 @@ successful rebuild.
 
 | Symptom | Check or action |
 | --- | --- |
-| `container` is unavailable | Confirm macOS 26+, Apple silicon, and the Apple container installation. This project does not use Docker. |
+| `container` is unavailable | Confirm macOS 26, Apple silicon, and the Apple container installation. This project does not use Docker. |
 | The service or image is missing | Run `aibox status`, then `aibox start` and `aibox build`. |
 | Build dependency downloads fail | The build still needs access to the base-image registry, Debian/PyPI, and npm sources. Fix that path or retry; local `third_party/` assets only replace their own downloads. |
 | A configured proxy fails immediately | Confirm that `third_party/gost` existed when the image was built, is Linux/arm64, and is executable; then rebuild. Check `aibox logs <target>`. |
