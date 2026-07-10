@@ -1,0 +1,673 @@
+#!/usr/bin/env bash
+# ai-box —— 在 apple/container 沙箱里跑 Claude Code / Codex,可按需配置上游代理
+#
+# 用法:
+#   —— 进容器 ——
+#   ai-box [/path]              # 挂载目录(默认当前)进容器,进 shell
+#   ai-box cc [/path]           # 进容器并直接启动 claude(cc 也可写作 claude)
+#   ai-box codex [/path]        # 进容器并直接启动 codex
+#   —— 容器管理 ——
+#   ai-box list [-a]            # 列运行中的 aibox 容器(带编号;-a 含已停止;也可写作 ls)
+#   ai-box enter [编号|项目名|容器名]  # 进入运行中的容器(不带参则交互选编号;不新建容器)
+#   ai-box stop <编号|项目名|容器名>   # 停止一个容器;aibox stop --all 停全部(均二次确认)
+#   ai-box logs <编号|项目名|容器名> [-f]  # 看某容器启动日志(排查代理起没起)
+#   ai-box clear                # 清理已停止的 aibox 容器(也可写作 prune)
+#   —— 镜像 / 服务 ——
+#   ai-box start                # 启动 container 服务(= container system start)
+#   ai-box build [--no-cache]   # 构建/重建镜像(tag 与上下文写死;参数透传)
+#   ai-box update [cc|codex]    # 检查 CLI 新版,确认后改 Dockerfile 并重建(不带参两个都查)
+#   ai-box version              # 显示 Dockerfile 声明的 CLI 目标版本
+#   ai-box status               # 一屏自检:服务 / 镜像 / 目标版本 / 运行中的容器
+#   ai-box help                 # 命令速查(也认 -h / --help)
+#
+# 带子命令时,工具退出后留在容器 shell,再 exit 才销毁容器。
+#
+# 多窗口:每次运行都是一个独立容器,可同时开多个窗口跑不同项目。
+#   容器命名为 ai-<项目名>-<时间戳>,降低多窗口重名概率;提示符也显示项目名。
+#
+# 登录凭据:容器专属、可持久化,存在仓库的 creds/,
+#   独立于你宿主机自己的 ~/.claude / ~/.codex,容器里登录一次即可长期复用。
+#
+# 代理/时区/语言/容器环境变量:在仓库的 aibox.conf 里配(cp aibox.conf.example aibox.conf),都可选。
+#   AIBOX_PROXY   代理 URL(http/socks5/... );留空=直连
+#   AIBOX_TZ      时区;留空=跟随宿主机
+#   AIBOX_LANG    语言;留空=跟随宿主机
+#   AIBOX_ENV_VARS 传入容器的自定义 NAME=value 数组
+#   (旧的 FIXED_SOCKS_* 环境变量仍作 socks5 代理兜底,兼容老配置)
+#
+# 进容器后直接敲 `claude` 或 `codex`。
+set -euo pipefail
+
+IMAGE="ai-sandbox:latest"
+
+# 沙箱仓库目录 = 此脚本真实文件所在目录。逐层解析软链接,因此从 PATH 中的
+# aibox 链接调用也能定位正确的 Dockerfile、配置、凭据和缓存目录。
+# 写法兼容 macOS 自带 Bash 3.2,不依赖 readlink -f / realpath。
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+while [[ -h "$SCRIPT_PATH" ]]; do
+    SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" >/dev/null 2>&1 && pwd)"
+    LINK_TARGET="$(readlink "$SCRIPT_PATH")"
+    if [[ "$LINK_TARGET" == /* ]]; then
+        SCRIPT_PATH="$LINK_TARGET"
+    else
+        SCRIPT_PATH="$SCRIPT_DIR/$LINK_TARGET"
+    fi
+done
+SANDBOX_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" >/dev/null 2>&1 && pwd)"
+
+# ---- 子命令:help —— 打印命令速查(也认 -h / --help)----
+aibox_help() {
+    cat <<HELP
+aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上游代理
+
+进容器:
+  aibox [/path]                进沙箱 shell(默认当前目录)
+  aibox cc [/path]             进沙箱并直接启动 claude(cc 也可写作 claude)
+  aibox codex [/path]          进沙箱并直接启动 codex
+
+容器管理:
+  aibox list [-a]              列运行中的容器(带编号;-a 含已停止;也可写作 ls)
+  aibox enter [编号|项目名|容器名]  进入运行中的容器(不带参则交互选编号;不新建容器)
+  aibox stop <编号|项目名|容器名>   停止一个容器;aibox stop --all 停全部(均二次确认)
+  aibox logs <编号|项目名|容器名> [-f]  看某容器启动日志(排查代理起没起)
+  aibox clear                  清理已停止的 aibox 容器(也可写作 prune)
+
+镜像 / 服务:
+  aibox start                  启动 container 服务(= container system start)
+  aibox build [--no-cache]     构建/重建镜像(tag 与上下文写死;参数透传)
+  aibox update [cc|codex]      检查 CLI 新版,确认后改 Dockerfile 并重建(不带参两个都查)
+  aibox version                显示 Dockerfile 声明的 CLI 目标版本
+  aibox status                 一屏自检:服务 / 镜像 / 目标版本 / 运行中的容器
+
+  aibox help                   显示本帮助(也认 -h / --help)
+
+说明:
+  · stop/logs/enter 的目标标识统一:编号(取自 aibox list)、项目名、或完整容器名。
+  · Tab 补全:在 ~/.zshrc 或 ~/.bashrc 里 source "$SANDBOX_DIR/ai-box-completion.sh"
+  · 代理/时区/语言/自定义环境变量在 "$SANDBOX_DIR/aibox.conf" 配。
+HELP
+}
+if [[ "${1:-}" == "help" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    aibox_help
+    exit 0
+fi
+
+# ---- 子命令:update —— 检查 claude/codex CLI 新版,确认后更新镜像 ----
+# 版本源用 npmmirror(与 Dockerfile 构建同一个源,查到的版本一定装得到)。
+# 流程:取 latest → 对比 Dockerfile 里的 ARG 版本 → 输出结果 → [y/N] 确认 →
+#       改写 ARG 行 + container build。无更新/取消/查询失败都不碰 Dockerfile。
+if [[ "${1:-}" == "update" ]]; then
+    DOCKERFILE="$SANDBOX_DIR/Dockerfile"
+
+    TARGETS="claude codex"
+    case "${2:-}" in
+        "")        ;;
+        cc|claude) TARGETS="claude" ;;
+        codex)     TARGETS="codex" ;;
+        *)         echo "用法: ai-box update [cc|codex]" >&2; exit 2 ;;
+    esac
+
+    # 包名/ARG 名映射(macOS 自带 bash 3.2,没有关联数组,用函数代替)
+    pkg_of() { if [[ "$1" == "claude" ]]; then echo "@anthropic-ai/claude-code"; else echo "@openai/codex"; fi; }
+    arg_of() { if [[ "$1" == "claude" ]]; then echo "CLAUDE_CODE_VERSION"; else echo "CODEX_VERSION"; fi; }
+    latest_of() {
+        curl -fsSL --max-time 30 "https://registry.npmmirror.com/$1/latest" \
+            | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+    }
+
+    echo "==> 检查更新(版本源: npmmirror,与镜像构建同源)"
+    UPDATES=""   # 待更新列表,形如 " claude=2.1.205 codex=0.144.0"
+    for t in $TARGETS; do
+        argname="$(arg_of "$t")"
+        cur="$(sed -n "s/^ARG ${argname}=//p" "$DOCKERFILE")"
+        if [[ -z "$cur" ]]; then
+            echo "错误: $DOCKERFILE 里找不到 ARG ${argname}=..." >&2
+            exit 1
+        fi
+        new="$(latest_of "$(pkg_of "$t")" || true)"
+        if [[ -z "$new" ]]; then
+            echo "错误: 获取 $(pkg_of "$t") 最新版本失败(检查网络/代理)" >&2
+            exit 1
+        fi
+        if [[ "$new" == "$cur" ]]; then
+            echo "    $t: $cur(已是最新)"
+        else
+            echo "    $t: $cur -> $new"
+            UPDATES="$UPDATES $t=$new"
+        fi
+    done
+
+    if [[ -z "$UPDATES" ]]; then
+        echo "==> 没有可用更新。"
+        exit 0
+    fi
+
+    ANSWER=""
+    read -r -p "==> 确认更新以上版本并重建镜像?[y/N] " ANSWER || true
+    if [[ "$ANSWER" != "y" && "$ANSWER" != "Y" ]]; then
+        echo "==> 已取消,Dockerfile 未改动。"
+        exit 0
+    fi
+
+    for u in $UPDATES; do
+        argname="$(arg_of "${u%%=*}")"
+        # BSD/GNU sed 通吃的就地改写:写临时文件再替换,不用 sed -i(两家语法不同)
+        sed "s/^ARG ${argname}=.*/ARG ${argname}=${u#*=}/" "$DOCKERFILE" > "$DOCKERFILE.tmp"
+        mv "$DOCKERFILE.tmp" "$DOCKERFILE"
+    done
+    echo "==> 已改写 Dockerfile 版本号,开始重建镜像 $IMAGE ..."
+    if (cd "$SANDBOX_DIR" && container build -t "$IMAGE" .); then
+        echo "==> 完成。新开的容器即为新版;正在运行的容器不受影响。"
+    else
+        echo "==> 构建失败。版本号已改进 Dockerfile(改动本身无需回退)," >&2
+        echo "    排查后重跑 ai-box update,或手动: cd \"$SANDBOX_DIR\" && container build -t $IMAGE ." >&2
+        exit 1
+    fi
+    exit 0
+fi
+
+# ---- list / enter 共用:枚举 + 反推 helper ----
+# 运行中的 aibox 容器名,按名字排序 —— 保证 list / 交互选择 / enter <编号> 三处编号一致。
+# 用 `container ls -q` 只取容器 ID(= 我们 --name 设的 ai-<项目>-<时间戳>),不解析表格/JSON。
+aibox_names() {
+    container ls -q 2>/dev/null | grep '^ai-' | sort || true
+}
+# 从容器名反推「项目名 / 启动时刻」,结果写进全局 REPLY_PROJ / REPLY_STARTED。
+# 项目名本身含 - 也没关系(时间戳恒为末尾 6 位数字,从右侧剥离)。
+aibox_parse() {
+    local rest="${1#ai-}" ts="${1##*-}"
+    ts="${ts:0:6}"
+    if [[ "${1##*-}" =~ ^[0-9]{6}$ ]]; then
+        REPLY_PROJ="${rest%-*}"
+        REPLY_STARTED="${ts:0:2}:${ts:2:2}:${ts:4:2}"
+    else
+        REPLY_PROJ="$rest"; REPLY_STARTED="?"   # 名字不符合命名规则时的兜底
+    fi
+}
+# 把运行中的容器名读进数组 AIBOX_LIST(bash 3.2 无 mapfile,用 while-read)。
+aibox_load() {
+    AIBOX_LIST=()
+    local n
+    while IFS= read -r n; do
+        [[ -n "$n" ]] && AIBOX_LIST+=("$n")
+    done < <(aibox_names)
+}
+# 打印带编号的列表(供 list 与交互式 enter 共用)。假定 AIBOX_LIST 非空。
+aibox_print() {
+    local i=1 n
+    for n in "${AIBOX_LIST[@]}"; do
+        aibox_parse "$n"
+        printf '  [%d] %-26s  项目 %-16s  启动 %s\n' "$i" "$n" "$REPLY_PROJ" "$REPLY_STARTED"
+        i=$((i+1))
+    done
+}
+# 含已停止在内的全部 aibox 容器名(排序)。供 list -a / clear 用。
+aibox_names_all() {
+    container ls -a -q 2>/dev/null | grep '^ai-' | sort || true
+}
+# 把「编号 | 项目名 | 完整容器名」解析成唯一容器名(供 enter / stop / logs 共用)。
+# 依赖调用方已 aibox_load 填好 AIBOX_LIST(运行中、已排序)。
+# 命中 -> 把名字打到 stdout 并 return 0;失败 -> 原因打到 stderr 并 return 1。
+aibox_resolve_one() {
+    local target="$1" n
+    if [[ "$target" =~ ^[0-9]+$ ]]; then                 # ① 编号
+        if (( target < 1 || target > ${#AIBOX_LIST[@]} )); then
+            echo "编号 $target 超出范围(共 ${#AIBOX_LIST[@]} 个)。用 aibox list 查看。" >&2
+            return 1
+        fi
+        echo "${AIBOX_LIST[$((target-1))]}"; return 0
+    fi
+    for n in "${AIBOX_LIST[@]}"; do                       # ② 完整名精确
+        [[ "$n" == "$target" ]] && { echo "$n"; return 0; }
+    done
+    local candidates=()                                   # ③ 项目名(字面比较)
+    for n in "${AIBOX_LIST[@]}"; do
+        aibox_parse "$n"
+        [[ "$REPLY_PROJ" == "$target" ]] && candidates+=("$n")
+    done
+    if [[ "${#candidates[@]}" -eq 1 ]]; then
+        echo "${candidates[0]}"; return 0
+    elif [[ "${#candidates[@]}" -gt 1 ]]; then
+        echo "项目 '$target' 有多个容器,请用编号或完整容器名指定其一:" >&2
+        printf '    %s\n' "${candidates[@]}" >&2
+        return 1
+    fi
+    echo "没找到匹配 '$target' 的运行中容器。用 aibox list 查看。" >&2
+    return 1
+}
+
+# ---- 子命令:list —— 列出正在运行的 aibox 容器(-a 含已停止)----
+if [[ "${1:-}" == "list" || "${1:-}" == "ls" ]]; then
+    if [[ "${2:-}" == "-a" || "${2:-}" == "--all" ]]; then
+        # -a:列全部(含已停止),标出状态。此视图不带编号 —— 编号只服务于「运行中」列表
+        # (即 enter/stop <编号> 的口径),不带 -a 时才显示编号,避免两套编号打架。
+        running="$(container ls -q 2>/dev/null | grep '^ai-' | sort || true)"
+        all="$(aibox_names_all)"
+        if [[ -z "$all" ]]; then
+            echo "没有 aibox 容器(含已停止)。"
+            exit 0
+        fi
+        echo "aibox 容器(含已停止):"
+        while IFS= read -r n; do
+            [[ -z "$n" ]] && continue
+            aibox_parse "$n"
+            if grep -qxF "$n" <<< "$running"; then st="运行中"; else st="已停止"; fi
+            printf '  %-26s  项目 %-16s  %-6s  启动 %s\n' "$n" "$REPLY_PROJ" "$st" "$REPLY_STARTED"
+        done <<< "$all"
+        exit 0
+    fi
+    aibox_load
+    if [[ "${#AIBOX_LIST[@]}" -eq 0 ]]; then
+        echo "没有正在运行的 aibox 容器。"
+        echo "(用 aibox / aibox cc / aibox codex 启动一个;aibox list -a 看含已停止的)"
+        exit 0
+    fi
+    echo "正在运行的 aibox 容器:"
+    aibox_print
+    echo
+    echo "进入: aibox enter <编号 | 项目名 | 完整容器名>,或直接 aibox enter 交互选择"
+    exit 0
+fi
+
+# ---- 子命令:enter —— 进入一个正在运行的容器 ----
+# 标识可以是:① 空(交互式列编号让你输数字)② 纯数字(list 里的编号)
+#             ③ 完整容器名 ④ 项目名(ai-<项目>-<6位时间戳>)。
+# 底层 `container exec -it -w /workspace/<项目> <name> bash`:
+#   起的是交互 bash,会读容器内 ~/.bashrc —— entrypoint 启动时已把环境变量和
+#   [项目名] 提示符写进去了,所以进去的环境跟原窗口一致;启用代理时 gost 也无需重启。
+if [[ "${1:-}" == "enter" ]]; then
+    target="${2:-}"
+    aibox_load
+    if [[ "${#AIBOX_LIST[@]}" -eq 0 ]]; then
+        echo "没有正在运行的 aibox 容器。用 aibox 启动一个。" >&2
+        exit 1
+    fi
+
+    if [[ -z "$target" ]]; then
+        # ① 无参数:列编号,读一个数字
+        echo "正在运行的 aibox 容器:"
+        aibox_print
+        printf '选择要进入的编号 [1-%d]: ' "${#AIBOX_LIST[@]}"
+        read -r sel || true
+        if [[ ! "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#AIBOX_LIST[@]} )); then
+            echo "无效编号: '${sel:-}'" >&2
+            exit 1
+        fi
+        match="${AIBOX_LIST[$((sel-1))]}"
+    else
+        # ②③④ 编号 / 完整名 / 项目名 —— 交给共用解析器
+        match="$(aibox_resolve_one "$target")" || exit 1
+    fi
+
+    aibox_parse "$match"    # 反推项目名 -> 落到项目工作目录
+    echo "==> 进入容器: $match(项目 $REPLY_PROJ)。exit 只离开这个 shell,不销毁容器。"
+    exec container exec -it -w "/workspace/$REPLY_PROJ" "$match" bash
+fi
+
+# ---- 子命令:start —— 启动 container 服务 ----
+if [[ "${1:-}" == "start" ]]; then
+    echo "==> container system start"
+    container system start
+    exit $?
+fi
+
+# ---- 子命令:build —— 构建/重建镜像(tag 与上下文目录写死,--no-cache 等参数透传)----
+if [[ "${1:-}" == "build" ]]; then
+    shift
+    if [[ $# -gt 0 ]]; then
+        echo "==> 构建镜像 $IMAGE(上下文 $SANDBOX_DIR,附加参数: $*)"
+    else
+        echo "==> 构建镜像 $IMAGE(上下文 $SANDBOX_DIR)"
+    fi
+    ( cd "$SANDBOX_DIR" && container build "$@" -t "$IMAGE" . )
+    exit $?
+fi
+
+# ---- 子命令:stop —— 停止运行中的容器(--rm 容器,停即销毁)----
+if [[ "${1:-}" == "stop" ]]; then
+    target="${2:-}"
+    if [[ -z "$target" ]]; then
+        echo "用法: aibox stop <编号|项目名|容器名>  或  aibox stop --all" >&2
+        exit 2
+    fi
+    if [[ "$target" == "--all" || "$target" == "-a" ]]; then
+        running="$(container ls -q 2>/dev/null | grep '^ai-' | sort || true)"
+        if [[ -z "$running" ]]; then echo "没有正在运行的 aibox 容器。"; exit 0; fi
+        echo "将停止以下所有 aibox 容器:"
+        echo "$running" | sed 's/^/    /'
+        read -r -p "确认全部停止?[y/N] " ans || true
+        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then echo "已取消。"; exit 0; fi
+        while IFS= read -r n; do [[ -n "$n" ]] && container stop "$n"; done <<< "$running"
+        exit 0
+    fi
+    aibox_load
+    if [[ "${#AIBOX_LIST[@]}" -eq 0 ]]; then
+        echo "没有正在运行的 aibox 容器。" >&2; exit 1
+    fi
+    match="$(aibox_resolve_one "$target")" || exit 1
+    echo "==> 停止容器: $match"
+    exec container stop "$match"
+fi
+
+# ---- 子命令:logs —— 看某容器的启动日志(排查 gost/代理起没起)----
+# 用法:aibox logs <编号|项目名|容器名> [透传给 container logs 的参数,如 -f]
+if [[ "${1:-}" == "logs" ]]; then
+    target="${2:-}"
+    if [[ -z "$target" ]]; then
+        echo "用法: aibox logs <编号|项目名|容器名> [-f ...]" >&2
+        exit 2
+    fi
+    shift 2                       # 去掉 'logs' 与 target,剩下透传给 container logs
+    aibox_load
+    if [[ "${#AIBOX_LIST[@]}" -eq 0 ]]; then
+        echo "没有正在运行的 aibox 容器。" >&2; exit 1
+    fi
+    match="$(aibox_resolve_one "$target")" || exit 1
+    exec container logs "$@" "$match"
+fi
+
+# ---- 子命令:clear(别名 prune)—— 清理已停止的 aibox 容器 ----
+# 正常 --rm 容器不留残骸;崩溃/异常退出偶尔会留下已停止的,用这个清。只动 ai-* 容器。
+if [[ "${1:-}" == "clear" || "${1:-}" == "prune" ]]; then
+    running="$(container ls -q 2>/dev/null | grep '^ai-' | sort || true)"
+    all="$(aibox_names_all)"
+    stopped=()
+    while IFS= read -r n; do
+        [[ -z "$n" ]] && continue
+        grep -qxF "$n" <<< "$running" || stopped+=("$n")   # all - running = 已停止
+    done <<< "$all"
+    if [[ "${#stopped[@]}" -eq 0 ]]; then
+        echo "没有已停止的 aibox 容器需要清理。"
+        exit 0
+    fi
+    echo "将删除以下已停止的 aibox 容器:"
+    printf '    %s\n' "${stopped[@]}"
+    read -r -p "确认删除?[y/N] " ans || true
+    if [[ "$ans" != "y" && "$ans" != "Y" ]]; then echo "已取消。"; exit 0; fi
+    container delete "${stopped[@]}"
+    echo "已清理 ${#stopped[@]} 个。"
+    exit 0
+fi
+
+# ---- 子命令:version —— 显示 Dockerfile 声明的 CLI 目标版本 ----
+if [[ "${1:-}" == "version" ]]; then
+    cv="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null)"
+    xv="$(sed -n 's/^ARG CODEX_VERSION=//p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null)"
+    if [[ -z "$cv$xv" ]]; then
+        echo "读不到版本(检查 $SANDBOX_DIR/Dockerfile)。" >&2; exit 1
+    fi
+    echo "claude-code: ${cv:-?}"
+    echo "codex:       ${xv:-?}"
+    echo "(这是 Dockerfile 的构建目标,不保证与当前已构建镜像一致;查新版用 aibox update)"
+    exit 0
+fi
+
+# ---- 子命令:status —— 一屏自检:服务 / 镜像 / 目标版本 / 运行中的容器 ----
+if [[ "${1:-}" == "status" ]]; then
+    echo "== ai-sandbox 状态 =="
+    # 服务:能否列容器 = 服务是否在跑(服务没起 container ls 会失败)
+    if container ls >/dev/null 2>&1; then
+        svc_up=1; echo "  服务       : 运行中"
+    else
+        svc_up=0; echo "  服务       : 未启动(试 aibox start)"
+    fi
+    # 镜像:多探针兜底(inspect / images),都不中就报未知,不误判
+    if container image inspect "$IMAGE" >/dev/null 2>&1 \
+       || container images 2>/dev/null | grep -q 'ai-sandbox'; then
+        echo "  镜像       : 已构建($IMAGE)"
+    else
+        echo "  镜像       : 未构建或查不到(试 aibox build)"
+    fi
+    # 目标版本:读 Dockerfile 声明;不把它误报成已构建镜像中的实际版本
+    cv="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null)"
+    xv="$(sed -n 's/^ARG CODEX_VERSION=//p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null)"
+    echo "  目标版本   : claude ${cv:-?} / codex ${xv:-?}"
+    # 运行中的容器
+    if [[ "$svc_up" -eq 1 ]]; then
+        aibox_load
+        if [[ "${#AIBOX_LIST[@]}" -eq 0 ]]; then
+            echo "  运行中容器 : (无)"
+        else
+            echo "  运行中容器 :"
+            aibox_print
+        fi
+    fi
+    exit 0
+fi
+
+# 容器 VM 内存。apple/container 默认每容器只给 1G,claude(node 进程)长会话内存只增不减,
+# 逼近内存墙后 GC 频繁 + page cache 被挤 + 无 swap,表现为越用越卡、最坏被 OOM 杀掉。
+# Mac 对 VM 内存按需分配,调大不会白占宿主机内存。数值必须带单位(见 README 踩坑表)。
+MEMORY="8192M"
+
+# ---- 可选子命令:cc / claude -> 启动 claude;codex -> 启动 codex;不带则只进 shell ----
+LAUNCH=""
+case "${1:-}" in
+    cc|claude) LAUNCH="claude"; shift ;;
+    codex)     LAUNCH="codex";  shift ;;
+esac
+
+HOST_DIR="${1:-$PWD}"
+HOST_DIR="$(cd "$HOST_DIR" && pwd)"
+
+# 项目名 = 挂载目录的最后一段,清洗成合法的容器名字符(去掉首尾多余的 -)
+PROJECT_NAME="$(basename "$HOST_DIR" | tr -c 'a-zA-Z0-9_.-' '-' | sed 's/^-*//; s/-*$//')"
+[[ -z "$PROJECT_NAME" ]] && PROJECT_NAME="project"
+
+# 容器名 = ai-<项目名>-<时间戳后缀>。
+# 时间戳后缀可降低同一项目多窗口的重名概率,但同一秒启动仍可能冲突。
+# 该命名方式不依赖 container list 的输出格式(不同版本字段不一,不好解析)。
+CONTAINER_NAME="ai-${PROJECT_NAME}-$(date +%H%M%S)"
+
+# 真实目录 / 挂载目录 / 容器名称 不在这里打印 —— 一起并进容器内 entrypoint 的启动参数横幅
+# (通过 -e 传进去),省得主机侧和横幅两处分散。
+if [[ -n "$LAUNCH" ]]; then
+    echo "==> 进入后自动启动: $LAUNCH(退出 $LAUNCH 后留在容器 shell,再 exit 销毁容器)"
+fi
+
+# ---- 统一配置:代理 / 时区 / 语言(aibox.conf,运行期可选)----
+# 优先级:已导出的同名环境变量 > 配置文件 aibox.conf > 默认(留空 / 跟随宿主机)。
+# 解析在宿主机侧做(时区/语言的「跟随宿主机」只有这里能取到),再通过 -e 传进容器。
+AIBOX_CONF="$SANDBOX_DIR/aibox.conf"
+# 先记住环境变量里已有的值(用于覆盖 + 标注来源)
+_env_proxy="${AIBOX_PROXY:-}"; _env_tz="${AIBOX_TZ:-}"; _env_lang="${AIBOX_LANG:-}"
+AIBOX_PROXY=""; AIBOX_TZ=""; AIBOX_LANG=""
+AIBOX_ENV_VARS=()
+conf_exists=0
+# shellcheck disable=SC1090
+[[ -f "$AIBOX_CONF" ]] && { conf_exists=1; source "$AIBOX_CONF"; }   # 此刻 AIBOX_* = 配置文件的值(或空)
+_conf_proxy="$AIBOX_PROXY"; _conf_tz="$AIBOX_TZ"; _conf_lang="$AIBOX_LANG"
+
+# 自定义环境变量只从 aibox.conf 的 Bash indexed array 读取。每项按第一个等号拆分,
+# 因而空值、空格及值中的额外等号都能原样保留。这里仅校验并暂存;运行容器前再写入
+# 权限为 0600 的临时 env-file,避免自定义 PATH/HOME 等变量影响宿主机侧脚本行为。
+AIBOX_CUSTOM_ENV_NAMES=()
+AIBOX_CUSTOM_ENV_VALUES=()
+# macOS Bash 3.2 在 set -u 下不能展开空数组的 "${array[@]}",必须先判断长度。
+if (( ${#AIBOX_ENV_VARS[@]} > 0 )); then
+    custom_env_pos=0
+    for custom_env_entry in "${AIBOX_ENV_VARS[@]}"; do
+        custom_env_pos=$((custom_env_pos + 1))
+        if [[ "$custom_env_entry" != *=* ]]; then
+            echo "错误: aibox.conf 的 AIBOX_ENV_VARS 第 $custom_env_pos 项缺少 '=';格式必须为 NAME=value。" >&2
+            exit 1
+        fi
+        custom_env_name="${custom_env_entry%%=*}"
+        custom_env_value="${custom_env_entry#*=}"
+        if [[ ! "$custom_env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "错误: aibox.conf 的 AIBOX_ENV_VARS 第 $custom_env_pos 项包含非法变量名;名称必须匹配 ^[A-Za-z_][A-Za-z0-9_]*\$。" >&2
+            exit 1
+        fi
+        if [[ "$custom_env_name" == AIBOX_* ]]; then
+            echo "错误: aibox.conf 的 AIBOX_ENV_VARS 第 $custom_env_pos 项使用了保留的 AIBOX_ 变量名前缀。" >&2
+            exit 1
+        fi
+        if [[ "$custom_env_value" == *$'\r'* || "$custom_env_value" == *$'\n'* ]]; then
+            echo "错误: aibox.conf 的 AIBOX_ENV_VARS 第 $custom_env_pos 项包含换行符;env-file 的值必须为单行。" >&2
+            exit 1
+        fi
+        AIBOX_CUSTOM_ENV_NAMES+=("$custom_env_name")
+        AIBOX_CUSTOM_ENV_VALUES+=("$custom_env_value")
+    done
+fi
+unset custom_env_entry custom_env_name custom_env_value custom_env_pos
+
+# 代理:环境变量 > aibox.conf > 兼容旧 FIXED_SOCKS_* > 空(直连)
+# 关键:一旦存在 aibox.conf,它就是权威来源 —— 不再回退 FIXED_SOCKS_*。否则你在 aibox.conf 里
+# 把 AIBOX_PROXY 设空/注释掉想「关代理」,却会被 ~/.zshrc 里遗留的 FIXED_SOCKS_* 复活成旧代理。
+# FIXED_SOCKS_* 兼容兜底只服务于「从没建过 aibox.conf」的纯老用户。
+if   [[ -n "$_env_proxy"  ]]; then AIBOX_PROXY="$_env_proxy";  proxy_src="环境变量"
+elif [[ -n "$_conf_proxy" ]]; then AIBOX_PROXY="$_conf_proxy"; proxy_src="aibox.conf"
+elif [[ "$conf_exists" -eq 0 && -n "${FIXED_SOCKS_HOST:-}" && -n "${FIXED_SOCKS_PORT:-}" ]]; then
+    if [[ -n "${FIXED_SOCKS_USER:-}" ]]; then
+        AIBOX_PROXY="socks5://${FIXED_SOCKS_USER}:${FIXED_SOCKS_PASS:-}@${FIXED_SOCKS_HOST}:${FIXED_SOCKS_PORT}"
+    else
+        AIBOX_PROXY="socks5://${FIXED_SOCKS_HOST}:${FIXED_SOCKS_PORT}"
+    fi
+    proxy_src="FIXED_SOCKS_*(兼容)"
+else AIBOX_PROXY=""; proxy_src=""
+fi
+
+# 时区:环境变量 > aibox.conf > 宿主机(readlink /etc/localtime) > 空(镜像默认)
+if   [[ -n "$_env_tz"  ]]; then AIBOX_TZ="$_env_tz";  tz_src="环境变量"
+elif [[ -n "$_conf_tz" ]]; then AIBOX_TZ="$_conf_tz"; tz_src="aibox.conf"
+else
+    AIBOX_TZ="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p')"
+    [[ -n "$AIBOX_TZ" ]] && tz_src="宿主机" || tz_src="镜像默认"
+fi
+
+# 语言:环境变量 > aibox.conf > 宿主机 $LANG > 空(镜像默认)
+if   [[ -n "$_env_lang"  ]]; then AIBOX_LANG="$_env_lang";  lang_src="环境变量"
+elif [[ -n "$_conf_lang" ]]; then AIBOX_LANG="$_conf_lang"; lang_src="aibox.conf"
+elif [[ -n "${LANG:-}" ]]; then AIBOX_LANG="$LANG"; lang_src="宿主机"
+else lang_src="镜像默认"
+fi
+
+# 代理/时区/语言的「值 + 来源」不在这里打印 —— 统一由容器内 entrypoint 的启动横幅显示
+# (避免宿主机侧和容器侧重复两遍)。来源标签通过 -e 传进去,横幅里带上。
+
+# 容器内运行用户是 node,HOME=/home/node,凭据要挂到它的 home 下。
+CONTAINER_HOME="/home/node"
+
+# ---- 容器专属、可持久化的凭据目录(独立于宿主机自己的 ~/.claude / ~/.codex)----
+# 容器里登录一次,token 存进这两个宿主机目录;--rm 容器销毁后登录态仍在,
+# 下次进容器免登录。且完全不碰你宿主机自己的登录状态。
+CREDS_DIR="$SANDBOX_DIR/creds"
+CLAUDE_CREDS="$CREDS_DIR/claude"
+CODEX_CREDS="$CREDS_DIR/codex"
+mkdir -p "$CLAUDE_CREDS" "$CODEX_CREDS"
+
+# 说明:只挂载凭据「目录」(~/.claude、~/.codex),不单独挂 ~/.claude.json 文件。
+# 原因:单文件挂载会因空文件/并发写导致 "Unexpected EOF" 损坏。
+#      镜像里设了 CLAUDE_CONFIG_DIR=/home/node/.claude,.claude.json 落在挂载目录内
+#      (~/.claude/.claude.json),作为目录里的普通文件持久化,onboarding/目录信任不会重置。
+
+# ---- Java 构建缓存 ----
+# Maven:共用宿主机自己的 ~/.m2/repository(主要是 jar 与构件缓存,不含 settings.xml)。
+#        注意只挂 repository 子目录、不挂整个 ~/.m2 —— settings.xml 不能共用:
+#        容器启用代理时由 entrypoint 单独生成对应配置,互不干扰。
+# Gradle:不共用宿主机 ~/.gradle(内含平台相关原生库/文件锁/daemon 状态,
+#        macOS 与 Linux 容器共写同一份会损坏缓存),用沙箱专属目录,容器之间持久化。
+M2_REPO="$HOME/.m2/repository"
+GRADLE_CACHE="$SANDBOX_DIR/cache/gradle"
+mkdir -p "$M2_REPO" "$GRADLE_CACHE"
+
+# 收集挂载参数:
+#   - 项目目录         -> /workspace/<项目名>
+#   - 容器专属凭据目录  -> /home/node/.claude  与  /home/node/.codex
+#   - Maven 仓库缓存    -> /home/node/.m2/repository(共用宿主机)
+#   - Gradle 缓存       -> /home/node/.gradle(沙箱专属)
+#
+# 挂载点带项目名的原因:Claude Code 以「工作目录的绝对路径」作为项目 key,
+# 会话记录/auto-memory/目录信任都按这个 key 存在共享的 ~/.claude 里。
+# 若所有项目都挂到同一个 /workspace,不同项目的状态会混进 projects/-workspace 一个桶;
+# 路径带上项目名即可按项目自然分桶(不同路径的同名项目仍会共桶,目前可接受)。
+MOUNTS=(
+    -v "$HOST_DIR:/workspace/$PROJECT_NAME"
+    -v "$CLAUDE_CREDS:$CONTAINER_HOME/.claude"
+    -v "$CODEX_CREDS:$CONTAINER_HOME/.codex"
+    -v "$M2_REPO:$CONTAINER_HOME/.m2/repository"
+    -v "$GRADLE_CACHE:$CONTAINER_HOME/.gradle"
+)
+
+# 把宿主机的 entrypoint.sh 挂进去,覆盖镜像里 COPY 的那份 —— 通过 ai-box 启动时,
+# 修改启动逻辑可立即生效。修改 Dockerfile 或 third_party/ 内容仍须运行 aibox build。
+# 镜像里仍 COPY 了一份作兜底:不带此挂载直接 `container run` 时用那份,故挂载缺失也不会起不来。
+# 注:这是「只读静态脚本」的单文件挂载,不同于当年会被写坏的 .claude.json,无 EOF 之虞。
+if [[ -f "$SANDBOX_DIR/entrypoint.sh" ]]; then
+    MOUNTS+=( -v "$SANDBOX_DIR/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro" )
+fi
+
+# 容器内要执行的命令:
+#   带子命令 -> 先跑目标工具,工具退出后 exec 进交互 shell(读 .bashrc,提示符/代理变量都在)
+#   不带     -> 直接进交互 shell
+if [[ -n "$LAUNCH" ]]; then
+    CMD=(bash -c "$LAUNCH; exec bash")
+else
+    CMD=(bash)
+fi
+
+# 自定义变量通过临时 env-file 传入。先由 mktemp 原子创建,再显式收紧到 0600;
+# EXIT 与常见终止信号均会清理。空列表不创建文件,也不添加 --env-file 参数。
+AIBOX_ENV_FILE=""
+aibox_cleanup_env_file() {
+    if [[ -n "${AIBOX_ENV_FILE:-}" ]]; then
+        rm -f -- "$AIBOX_ENV_FILE"
+        AIBOX_ENV_FILE=""
+    fi
+}
+if (( ${#AIBOX_CUSTOM_ENV_NAMES[@]} > 0 )); then
+    AIBOX_ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/aibox-env.XXXXXX")" || {
+        echo "错误: 无法创建自定义环境变量临时文件。" >&2
+        exit 1
+    }
+    trap aibox_cleanup_env_file EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    chmod 600 "$AIBOX_ENV_FILE" || {
+        echo "错误: 无法设置自定义环境变量临时文件权限。" >&2
+        exit 1
+    }
+    AIBOX_ENV_INDEX=0
+    while (( AIBOX_ENV_INDEX < ${#AIBOX_CUSTOM_ENV_NAMES[@]} )); do
+        printf '%s=%s\n' \
+            "${AIBOX_CUSTOM_ENV_NAMES[$AIBOX_ENV_INDEX]}" \
+            "${AIBOX_CUSTOM_ENV_VALUES[$AIBOX_ENV_INDEX]}" >> "$AIBOX_ENV_FILE" || {
+            echo "错误: 无法写入自定义环境变量临时文件。" >&2
+            exit 1
+        }
+        AIBOX_ENV_INDEX=$((AIBOX_ENV_INDEX + 1))
+    done
+    unset AIBOX_ENV_INDEX
+fi
+
+# 使用单个非空参数数组规避 macOS Bash 3.2 + set -u 的空数组展开问题。
+# AIBOX_PROXY 可能含代理凭据,同样只传变量名,避免值出现在 container 的 argv 中。
+AIBOX_RUN_ARGS=(
+    --rm -it
+    --memory "$MEMORY"
+    --name "$CONTAINER_NAME"
+    "${MOUNTS[@]}"
+    -w "/workspace/$PROJECT_NAME"
+    -e AIBOX_PROXY
+    -e "AIBOX_PROXY_SRC=${proxy_src:-无}"
+    -e "AIBOX_TZ=$AIBOX_TZ"
+    -e "AIBOX_TZ_SRC=$tz_src"
+    -e "AIBOX_LANG=$AIBOX_LANG"
+    -e "AIBOX_LANG_SRC=$lang_src"
+)
+if [[ -n "$AIBOX_ENV_FILE" ]]; then
+    AIBOX_RUN_ARGS+=( --env-file "$AIBOX_ENV_FILE" )
+fi
+AIBOX_RUN_ARGS+=(
+    -e "AIBOX_PROJECT=$PROJECT_NAME"
+    -e "AIBOX_HOST_DIR=$HOST_DIR"
+    -e "AIBOX_MOUNT=/workspace/$PROJECT_NAME"
+    -e "AIBOX_CONTAINER=$CONTAINER_NAME"
+    "$IMAGE"
+    "${CMD[@]}"
+)
+
+export AIBOX_PROXY
+container run "${AIBOX_RUN_ARGS[@]}"

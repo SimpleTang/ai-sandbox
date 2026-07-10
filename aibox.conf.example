@@ -1,0 +1,53 @@
+# aibox 运行期配置示例
+#
+# 用法:
+#   cp aibox.conf.example aibox.conf
+#   chmod 600 aibox.conf
+#
+# ai-box 会在宿主机上 source 这个文件。它具有执行当前用户任意命令的能力，
+# 因此只使用自己创建且已检查过的配置，不要直接采用不可信来源的文件。
+# aibox.conf 可能包含 API key、代理账密等秘密，已由 .gitignore / .dockerignore 排除。
+# 不要提交该文件，也不要把其中内容粘贴到 Issue 或日志中。
+#
+# 对代理、时区和语言，只有非空的同名环境变量会覆盖这里。例如
+# AIBOX_TZ=UTC aibox 只影响一次运行；导出空环境变量不能清除这里的非空值。
+# AIBOX_ENV_VARS 只从本文件读取，完整语义见 README.md。
+
+# ---- 代理（可选）----
+# 空值 = 直连。非空值需要构建镜像时 third_party/gost 存在。
+# 支持的上游 URL 示例：
+#   http://user:pass@proxy.example.com:8080
+#   https://user:pass@proxy.example.com:8443
+#   socks5://user:pass@proxy.example.com:1080   # 本地解析域名
+#   socks5h://user:pass@proxy.example.com:1080  # 由代理端解析域名
+# 无需认证时去掉 user:pass@。
+AIBOX_PROXY=""
+
+# ---- 时区（可选）----
+# 空值 = 跟随宿主机；无法识别宿主机时区时使用镜像默认 UTC。
+# 非空值使用 IANA 时区名，例如 Asia/Shanghai、Europe/London、
+# America/Los_Angeles 或 UTC。
+AIBOX_TZ=""
+
+# ---- 语言（可选）----
+# 空值 = 跟随宿主机 LANG；宿主机未设置时使用镜像默认 C.UTF-8。
+# 非空值必须是 Dockerfile 的 LOCALE_GEN 已生成的 locale，例如：
+# en_US.UTF-8、en_GB.UTF-8、zh_CN.UTF-8、zh_TW.UTF-8 或 ja_JP.UTF-8。
+AIBOX_LANG=""
+
+# ---- 自定义容器环境变量（可选）----
+# 每项必须是完整的 NAME=value，名称须匹配 [A-Za-z_][A-Za-z0-9_]*。
+# AIBOX_* 是 ai-box 内部保留名称，不能在此设置。
+# ai-box 按第一个 = 拆分名称和值，因此值可以为空、包含空格或继续包含 =；
+# 值必须保持单行，包含回车（CR）或换行（LF）的项会被拒绝。
+# 本文件遵循 Bash 引号与展开语义；保存秘密时建议用单引号避免意外展开。
+# ai-box 不会隐式透传宿主机已有的 ANTHROPIC_API_KEY、OPENAI_API_KEY 等变量。
+# 值通过权限为 0600 的临时 env-file 传入容器，不会放进 container CLI 参数，
+# 也不会导出到宿主 ai-box 进程环境；正常退出和常见终止信号会清理临时文件。
+AIBOX_ENV_VARS=(
+  # 'ANTHROPIC_API_KEY=replace-with-your-key'
+  # 'OPENAI_API_KEY=replace-with-your-key'
+  # 'CUSTOM_VALUE=value with spaces'
+  # 'EMPTY_VALUE='
+  # 'VALUE_WITH_EQUALS=left=right'
+)

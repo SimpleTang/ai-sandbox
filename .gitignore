@@ -1,0 +1,25 @@
+# Runtime configuration may contain API keys and other secrets.
+aibox.conf
+aibox.conf.*
+!aibox.conf.example
+
+# Credentials and local runtime state.
+creds/
+cache/
+.claude/
+.codex/
+.agents/
+
+# Optional, locally supplied build assets. Keep only the directory placeholder.
+third_party/*
+!third_party/.gitkeep
+
+# Common secret files and local backups.
+.env
+.env.*
+*.pem
+*.key
+*.bak
+*~
+
+.DS_Store

@@ -1,0 +1,10 @@
+# The image build needs only these files. An allowlist prevents credentials,
+# Git history, local configuration, and editor backups from reaching the builder.
+*
+!Dockerfile
+!entrypoint.sh
+!third_party/
+!third_party/.gitkeep
+!third_party/gost
+!third_party/jdk8.tar.gz
+!third_party/maven.tar.gz
