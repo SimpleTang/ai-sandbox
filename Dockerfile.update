@@ -1,0 +1,27 @@
+# Dockerfile.update —— `ai-box update` 专用的增量更新配方。
+#
+# 背景:主 Dockerfile 虽已按改动频率分层,但 apple/container 的 BuildKit builder
+# 缓存并不可靠(builder 删除/重建后层缓存全丢,而 builder 恰恰经常需要删除重建,
+# 见 README 故障排查),导致每次升级 CLI 都可能全量重跑 apt/locale/pip/npm 各层。
+# 这里改为「在现有镜像之上只叠一层 npm install」:不重跑任何旧层、不依赖 builder
+# 层缓存,只下载本次真正升级的包。
+#
+# 由 ai-box update 调用,两个 build-arg 均由它传入:
+#   BASE_IMAGE  现有镜像(默认 ai-sandbox:latest),必须已存在于本地镜像库
+#   NPM_SPECS   本次要安装的包,空格分隔,如 "@anthropic-ai/claude-code@2.1.208"
+#
+# 代价:每次增量更新叠一层新 layer,旧版本文件仍留在下层,镜像会缓慢变大。
+# 多次更新后用 `aibox build` 按主 Dockerfile 全量重建即可压平(update 同时改写了
+# 主 Dockerfile 的版本 ARG,全量重建得到的版本与增量结果一致)。
+ARG BASE_IMAGE=ai-sandbox:latest
+FROM ${BASE_IMAGE}
+
+# 基础镜像末尾是 USER node;npm install -g 写 /usr/local 需要 root,装完再切回。
+USER root
+ARG NPM_SPECS
+RUN set -eux; \
+    test -n "${NPM_SPECS}"; \
+    npm config set registry https://registry.npmmirror.com; \
+    npm install -g ${NPM_SPECS}; \
+    npm config delete registry
+USER node

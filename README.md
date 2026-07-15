@@ -281,7 +281,7 @@ aibox clear                           # 清理已停止容器；别名 prune
 # 服务、镜像和版本
 aibox start                           # 启动 Apple container 服务
 aibox build [--no-cache]              # 构建镜像
-aibox update [cc|codex]               # 检查版本，确认后修改 Dockerfile 并重建
+aibox update [cc|codex]               # 检查版本，确认后增量更新镜像
 aibox version                         # 显示 Dockerfile 中锁定的 CLI 版本
 aibox status                          # 显示服务、镜像、锁定版本和运行中容器
 aibox help                            # 命令帮助
@@ -315,7 +315,9 @@ aibox update cc        # 仅 Claude Code
 aibox update codex     # 仅 Codex
 ```
 
-更新命令从 npm 镜像查询版本，显示差异并等待确认；确认后会修改 `Dockerfile` 中的锁定版本并重建镜像。新容器使用新镜像，已经运行的容器不受影响。修改 `Dockerfile`、`LOCALE_GEN` 或已识别的 `third_party` 文件后，也需要运行 `aibox build`。修改 `aibox.conf`、宿主端 `ai-box` 或运行时挂载的 `entrypoint.sh` 后，下次启动容器即可生效。
+更新命令从 npm 镜像查询版本，显示差异并等待确认；确认后会修改 `Dockerfile` 中的锁定版本，然后用 `Dockerfile.update` 做**增量更新**：在现有镜像之上只叠一层 `npm install`，只下载本次有更新的包，不重跑 apt/locale/pip 等旧层，也不依赖 builder 的层缓存（builder 删除重建后缓存会全丢，全量构建就得重下所有依赖）。若本地没有镜像或增量构建失败，会提示回退全量构建。新容器使用新镜像，已经运行的容器不受影响。
+
+增量更新每次都会给镜像叠加一层新 layer（旧版本文件仍留在下层），多次更新后镜像会缓慢变大，可用 `aibox build` 全量重建压平——`update` 已同步改写 `Dockerfile` 的版本 ARG，全量重建得到的版本与增量结果一致。修改 `Dockerfile`、`LOCALE_GEN` 或已识别的 `third_party` 文件后，也需要运行 `aibox build`。修改 `aibox.conf`、宿主端 `ai-box` 或运行时挂载的 `entrypoint.sh` 后，下次启动容器即可生效。
 
 ## 排障
 

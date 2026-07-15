@@ -2,6 +2,7 @@
 # Git history, local configuration, and editor backups from reaching the builder.
 *
 !Dockerfile
+!Dockerfile.update
 !entrypoint.sh
 !third_party/
 !third_party/.gitkeep

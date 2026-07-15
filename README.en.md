@@ -373,8 +373,17 @@ java -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8080 \
 ## Updates and Rebuilds
 
 `aibox update`, optionally limited to `cc` or `codex`, checks the npm mirror, shows the pinned and
-latest versions, asks for confirmation, updates the Dockerfile ARG, and rebuilds the image. Existing
-containers keep their old image; new containers use the rebuilt one.
+latest versions, asks for confirmation, and updates the Dockerfile ARG. It then performs an
+**incremental update** via `Dockerfile.update`: a single `npm install` layer stacked on top of the
+existing image, downloading only the packages that actually changed. This skips the apt/locale/pip
+layers entirely and does not depend on the builder's layer cache (which is lost whenever the builder
+container is deleted and recreated, turning a full rebuild into a re-download of every dependency).
+If the local image is missing or the incremental build fails, the command offers a full rebuild
+instead. Existing containers keep their old image; new containers use the updated one.
+
+Each incremental update adds a new layer while older CLI files remain in lower layers, so the image
+grows slowly over repeated updates. Run `aibox build` occasionally to squash it — `update` keeps the
+Dockerfile pins in sync, so a full rebuild reproduces the same versions.
 
 Rebuild after changing the Dockerfile, any `third_party/` asset, or pinned CLI versions. Changes to
 `aibox.conf` and `entrypoint.sh` apply to the next new container without rebuilding; changes to the

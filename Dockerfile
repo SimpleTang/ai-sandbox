@@ -4,10 +4,14 @@ FROM node:22-bookworm
 # ============================================================================
 # 层顺序原则:按「改动频率」从低到高排 —— 越少变的越靠前,越常变的越靠后。
 # Docker 缓存规则:某层一旦变化,它「后面所有层」全部失效重跑。
-# 这里最常变的是两个 AI CLI 的版本(`ai-box update` 每次都改 ARG 版本号),
-# 所以把 npm 安装层放到最末尾(USER/ENTRYPOINT 等纯元数据层之前),
-# `ai-box update` 只改靠后的版本 ARG,前面的 apt / locale / 可选本地包 / ipcheck 层可复用缓存。
-# 修改 Dockerfile 或 third_party/ 内容时,则从对应层开始重新构建。
+# 这里最常变的是两个 AI CLI 的版本,npm 安装层放到最末尾(USER/ENTRYPOINT 等
+# 纯元数据层之前),前面的 apt / locale / 可选本地包 / ipcheck 层可复用缓存。
+#
+# 注意:日常升级 CLI 走的不是本文件全量构建 —— apple/container 的 builder 层缓存
+# 不可靠(builder 删除重建后全丢),全量构建常常等于重下所有依赖。`ai-box update`
+# 会改写本文件的版本 ARG(保持配方是唯一事实源),但实际构建用 Dockerfile.update
+# 在现有镜像上增量叠一层 npm install。本文件用于首次构建、修改配方后的重建,
+# 以及多次增量更新后的「压平」重建(aibox build)。
 # ============================================================================
 
 # ---- apt 基础工具(极少变)----
@@ -122,17 +126,18 @@ RUN echo 'node ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/node \
 # 让工具走 IPv4。(entrypoint 里还会用 sudo sysctl 真正关掉 IPv6。)
 RUN echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
 
-# ============ 最重、最常变的层:两个 AI CLI(`ai-box update` 每次都改这里)============
-# 放在所有「联网/耗时」层的最后,升级只重跑本层 —— 后面仅剩 entrypoint 的本地 COPY
-# 和 USER/ENTRYPOINT 等零成本元数据层。
+# ============ 最重、最常变的层:两个 AI CLI ============
+# 放在所有「联网/耗时」层的最后,全量重建时若缓存可用,版本变化只重跑本层 ——
+# 后面仅剩 entrypoint 的本地 COPY 和 USER/ENTRYPOINT 等零成本元数据层。
 #   - Claude Code:  @anthropic-ai/claude-code
 #   - Codex CLI:    @openai/codex
 # 版本号由下面两个 ARG 锁定:宿主机跑 `ai-box update` 会查 npmmirror 最新版、
-# 输出对比结果并在确认后改写这两行;版本号一变本层缓存失效(且因为在最后,不连累其它层)。
+# 输出对比结果并在确认后改写这两行;实际升级安装由 Dockerfile.update 增量完成
+# (见文件头注释),这两行保证之后任何一次全量重建都复现相同版本。
 # npm 官方源在 builder 里可能同样解析不稳,改用淘宝镜像(通常不被污染)。
 # 注意:npm install -g 写 /usr/local,须以 root 执行,故必须在下面 `USER node` 之前。
-ARG CLAUDE_CODE_VERSION=2.1.207
-ARG CODEX_VERSION=0.142.5
+ARG CLAUDE_CODE_VERSION=2.1.210
+ARG CODEX_VERSION=0.144.4
 RUN npm config set registry https://registry.npmmirror.com \
     && npm install -g \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \

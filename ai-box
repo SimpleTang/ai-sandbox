@@ -15,7 +15,7 @@
 #   —— 镜像 / 服务 ——
 #   ai-box start                # 启动 container 服务(= container system start)
 #   ai-box build [--no-cache]   # 构建/重建镜像(tag 与上下文写死;参数透传)
-#   ai-box update [cc|codex]    # 检查 CLI 新版,确认后改 Dockerfile 并重建(不带参两个都查)
+#   ai-box update [cc|codex]    # 检查 CLI 新版,确认后在现有镜像上增量更新(不带参两个都查)
 #   ai-box version              # 显示 Dockerfile 声明的 CLI 目标版本
 #   ai-box status               # 一屏自检:服务 / 镜像 / 目标版本 / 运行中的容器
 #   ai-box help                 # 命令速查(也认 -h / --help)
@@ -75,7 +75,7 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
 镜像 / 服务:
   aibox start                  启动 container 服务(= container system start)
   aibox build [--no-cache]     构建/重建镜像(tag 与上下文写死;参数透传)
-  aibox update [cc|codex]      检查 CLI 新版,确认后改 Dockerfile 并重建(不带参两个都查)
+  aibox update [cc|codex]      检查 CLI 新版,确认后增量更新镜像(不带参两个都查)
   aibox version                显示 Dockerfile 声明的 CLI 目标版本
   aibox status                 一屏自检:服务 / 镜像 / 目标版本 / 运行中的容器
 
@@ -95,7 +95,9 @@ fi
 # ---- 子命令:update —— 检查 claude/codex CLI 新版,确认后更新镜像 ----
 # 版本源用 npmmirror(与 Dockerfile 构建同一个源,查到的版本一定装得到)。
 # 流程:取 latest → 对比 Dockerfile 里的 ARG 版本 → 输出结果 → [y/N] 确认 →
-#       改写 ARG 行 + container build。无更新/取消/查询失败都不碰 Dockerfile。
+#       改写 ARG 行 + 增量构建(Dockerfile.update,在现有镜像上只叠一层 npm
+#       install,只下载有更新的包);增量失败可选回退全量构建。
+#       无更新/取消/查询失败都不碰 Dockerfile。
 if [[ "${1:-}" == "update" ]]; then
     DOCKERFILE="$SANDBOX_DIR/Dockerfile"
 
@@ -149,18 +151,48 @@ if [[ "${1:-}" == "update" ]]; then
         exit 0
     fi
 
+    NPM_SPECS=""    # 本次真正要装的包,如 "@anthropic-ai/claude-code@2.1.208"
     for u in $UPDATES; do
         argname="$(arg_of "${u%%=*}")"
         # BSD/GNU sed 通吃的就地改写:写临时文件再替换,不用 sed -i(两家语法不同)
         sed "s/^ARG ${argname}=.*/ARG ${argname}=${u#*=}/" "$DOCKERFILE" > "$DOCKERFILE.tmp"
         mv "$DOCKERFILE.tmp" "$DOCKERFILE"
+        NPM_SPECS="$NPM_SPECS $(pkg_of "${u%%=*}")@${u#*=}"
     done
-    echo "==> 已改写 Dockerfile 版本号,开始重建镜像 $IMAGE ..."
+    NPM_SPECS="${NPM_SPECS# }"
+    echo "==> 已改写 Dockerfile 版本号。"
+
+    # 优先增量更新:在现有镜像之上只叠一层 npm install(Dockerfile.update),
+    # 不重跑 apt/locale/pip 等旧层、不依赖 builder 的层缓存(builder 删除/重建后
+    # 缓存全丢,全量构建会重下所有依赖),也只下载本次真正升级的包。
+    # 前提是本地已有 $IMAGE 镜像;没有就只能全量构建。
+    if container image inspect "$IMAGE" >/dev/null 2>&1; then
+        echo "==> 增量更新:在 $IMAGE 之上安装 $NPM_SPECS ..."
+        if (cd "$SANDBOX_DIR" && container build -f Dockerfile.update \
+                --build-arg BASE_IMAGE="$IMAGE" --build-arg NPM_SPECS="$NPM_SPECS" \
+                -t "$IMAGE" .); then
+            echo "==> 完成(增量)。新开的容器即为新版;正在运行的容器不受影响。"
+            echo "    注:增量更新会给镜像叠加新层,多次更新后可用 aibox build 全量重建压平。"
+            exit 0
+        fi
+        echo "==> 增量构建失败(可能 builder 不支持本地镜像作基础镜像,或网络问题)。" >&2
+        ANSWER=""
+        read -r -p "==> 回退全量构建?(较慢,会重下所有依赖)[y/N] " ANSWER || true
+        if [[ "$ANSWER" != "y" && "$ANSWER" != "Y" ]]; then
+            echo "==> 已跳过构建。版本号已写入 Dockerfile,稍后可用 aibox build 全量构建生效。"
+            exit 1
+        fi
+    else
+        echo "==> 本地没有 $IMAGE 镜像,走全量构建。"
+    fi
+
+    echo "==> 全量构建镜像 $IMAGE ..."
     if (cd "$SANDBOX_DIR" && container build -t "$IMAGE" .); then
         echo "==> 完成。新开的容器即为新版;正在运行的容器不受影响。"
     else
-        echo "==> 构建失败。版本号已改进 Dockerfile(改动本身无需回退)," >&2
-        echo "    排查后重跑 ai-box update,或手动: cd \"$SANDBOX_DIR\" && container build -t $IMAGE ." >&2
+        echo "==> 构建失败。版本号已改进 Dockerfile(改动本身无需回退)。" >&2
+        echo "    注意:此时重跑 ai-box update 会显示「已是最新」而不再构建," >&2
+        echo "    排查后请用 aibox build(或手动: cd \"$SANDBOX_DIR\" && container build -t $IMAGE .)。" >&2
         exit 1
     fi
     exit 0
