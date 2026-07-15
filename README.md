@@ -249,7 +249,7 @@ Claude 和 Codex 的状态分别保存在仓库下的 `creds/claude/` 与 `creds
 | `<仓库>/creds/codex` | `/home/node/.codex` | Codex 登录及配置 |
 | `~/.m2/repository` | `/home/node/.m2/repository` | Maven 依赖缓存 |
 | `<仓库>/cache/gradle` | `/home/node/.gradle` | Linux 专用 Gradle 缓存和配置 |
-| `<仓库>/entrypoint.sh` | `/usr/local/bin/entrypoint.sh` | 只读的运行期入口脚本 |
+| `<仓库>/entrypoint.sh` 的启动时快照 | `/usr/local/bin/entrypoint.sh` | 只读的运行期入口脚本 |
 
 除入口脚本外，这些目录用于持久化读写。容器中的 AI 工具及其子进程能够读取或修改它们，项目文件的修改会立即反映到宿主机。不要为不可信代码挂载含敏感内容的项目，也不要把秘密放进 Maven/Gradle 缓存。
 
@@ -331,6 +331,7 @@ aibox update codex     # 仅 Codex
 | 长会话卡顿或被 OOM 终止 | 结束并恢复会话，或按主机容量调整 `MEMORY` |
 | 同名项目的 Claude 状态混合 | 使用不同的目录 basename，或为实例拆分凭据目录 |
 | 构建无法下载 APT/PyPI/npm 依赖 | 检查 builder 网络和 DNS；本地三方包不会替代这些在线依赖 |
+| 挂载的项目目录在容器内为空 | Apple container 的单文件挂载会连带共享其父目录；父目录若同时是另一挂载的源（如挂载沙箱仓库自身时的 `entrypoint.sh`），该目录会静默挂空。`ai-box` 已改挂 entrypoint 启动时快照规避；仍出现则更新宿主端 `ai-box` 或重启 container 服务 |
 
 日志中可能出现项目路径、代理主机或工具输出。提交问题前请删除 API key、代理账密、token 及业务数据。
 

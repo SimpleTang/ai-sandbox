@@ -131,7 +131,7 @@ RUN echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
 # 输出对比结果并在确认后改写这两行;版本号一变本层缓存失效(且因为在最后,不连累其它层)。
 # npm 官方源在 builder 里可能同样解析不稳,改用淘宝镜像(通常不被污染)。
 # 注意:npm install -g 写 /usr/local,须以 root 执行,故必须在下面 `USER node` 之前。
-ARG CLAUDE_CODE_VERSION=2.1.204
+ARG CLAUDE_CODE_VERSION=2.1.207
 ARG CODEX_VERSION=0.142.5
 RUN npm config set registry https://registry.npmmirror.com \
     && npm install -g \

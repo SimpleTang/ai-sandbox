@@ -304,7 +304,7 @@ container can access every path explicitly mounted by `ai-box`:
 | `<repo>/creds/claude` and `<repo>/creds/codex` | `/home/node/.claude` and `/home/node/.codex` | Persistent authentication and tool state |
 | `~/.m2/repository` | `/home/node/.m2/repository` | Maven artifacts shared with the host |
 | `<repo>/cache/gradle` | `/home/node/.gradle` | Linux-specific Gradle cache |
-| `<repo>/entrypoint.sh` | `/usr/local/bin/entrypoint.sh` | Read-only runtime entrypoint override |
+| Launch-time snapshot of `<repo>/entrypoint.sh` | `/usr/local/bin/entrypoint.sh` | Read-only runtime entrypoint override |
 
 The container user also has passwordless `sudo` inside its disposable container. Container code can
 modify the mounted project and persistent state, read values configured through `AIBOX_ENV_VARS`,
@@ -397,6 +397,7 @@ successful rebuild.
 | A long CLI session becomes slow or is killed | Check host memory pressure; the container requests `8192M`. Compact or restart long Claude sessions when appropriate. |
 | Two projects share Claude state | Give their mounted directories different basenames. |
 | Apple container's builder is stuck | Follow Apple container diagnostics; recreating the builder may discard builder state and should be a deliberate last resort. |
+| The mounted project directory is empty inside the container | Apple container's single-file mounts also share the file's parent directory; when that parent is itself the source of another mount (e.g. `entrypoint.sh` while mounting the sandbox repo as the project), that mount silently comes up empty. `ai-box` avoids this by mounting a launch-time snapshot of `entrypoint.sh`; if it still happens, update the host-side `ai-box` or restart the container service. |
 
 The startup banner reports the effective project, mount, proxy source, timezone, locale, and IPv6
 status. It is the first place to check after changing configuration.

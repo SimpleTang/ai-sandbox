@@ -590,12 +590,43 @@ MOUNTS=(
     -v "$GRADLE_CACHE:$CONTAINER_HOME/.gradle"
 )
 
-# 把宿主机的 entrypoint.sh 挂进去,覆盖镜像里 COPY 的那份 —— 通过 ai-box 启动时,
-# 修改启动逻辑可立即生效。修改 Dockerfile 或 third_party/ 内容仍须运行 aibox build。
+# ---- 运行期临时目录(entrypoint 快照 / 自定义环境变量 env-file 共用)----
+# mktemp -d 原子创建、权限 0700;首次使用时注册 EXIT 与常见终止信号的统一清理。
+# 清理必须只有一个 EXIT trap:bash 的 trap 是覆盖式,分开注册会互相顶掉。
+AIBOX_TMP_DIR=""
+aibox_cleanup_tmp() {
+    if [[ -n "${AIBOX_TMP_DIR:-}" ]]; then
+        rm -rf -- "$AIBOX_TMP_DIR"
+        AIBOX_TMP_DIR=""
+    fi
+}
+aibox_tmp_dir() {
+    if [[ -z "$AIBOX_TMP_DIR" ]]; then
+        AIBOX_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aibox.XXXXXX")" || {
+            echo "错误: 无法创建运行期临时目录。" >&2
+            exit 1
+        }
+        trap aibox_cleanup_tmp EXIT
+        trap 'exit 129' HUP
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+    fi
+}
+
+# 把宿主机 entrypoint.sh 的「启动时快照」挂进去,覆盖镜像里 COPY 的那份 —— 通过 ai-box
+# 启动时,修改启动逻辑下次启动即生效。修改 Dockerfile 或 third_party/ 仍须 aibox build。
 # 镜像里仍 COPY 了一份作兜底:不带此挂载直接 `container run` 时用那份,故挂载缺失也不会起不来。
-# 注:这是「只读静态脚本」的单文件挂载,不同于当年会被写坏的 .claude.json,无 EOF 之虞。
+# 为什么挂快照而不挂本尊:apple/container 的单文件挂载会连带共享其父目录;当父目录
+# (= 沙箱仓库)同时又是项目挂载源时(即 `aibox ~/ai-sandbox` 挂沙箱仓库自身),同一
+# 宿主机路径被共享两次,/workspace/<项目名> 会静默挂成空目录(见 README 已知问题)。
+# 快照位于独立临时目录,父目录不会与任何挂载源重合,对任何项目目录都安全。
 if [[ -f "$SANDBOX_DIR/entrypoint.sh" ]]; then
-    MOUNTS+=( -v "$SANDBOX_DIR/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro" )
+    aibox_tmp_dir
+    cp "$SANDBOX_DIR/entrypoint.sh" "$AIBOX_TMP_DIR/entrypoint.sh" || {
+        echo "错误: 无法复制 entrypoint.sh 到运行期临时目录。" >&2
+        exit 1
+    }
+    MOUNTS+=( -v "$AIBOX_TMP_DIR/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro" )
 fi
 
 # 容器内要执行的命令:
@@ -607,24 +638,16 @@ else
     CMD=(bash)
 fi
 
-# 自定义变量通过临时 env-file 传入。先由 mktemp 原子创建,再显式收紧到 0600;
-# EXIT 与常见终止信号均会清理。空列表不创建文件,也不添加 --env-file 参数。
+# 自定义变量通过临时 env-file 传入。放在 0700 的运行期临时目录内并收紧到 0600;
+# 清理随 aibox_tmp_dir 注册的统一 trap。空列表不创建文件,也不添加 --env-file 参数。
 AIBOX_ENV_FILE=""
-aibox_cleanup_env_file() {
-    if [[ -n "${AIBOX_ENV_FILE:-}" ]]; then
-        rm -f -- "$AIBOX_ENV_FILE"
-        AIBOX_ENV_FILE=""
-    fi
-}
 if (( ${#AIBOX_CUSTOM_ENV_NAMES[@]} > 0 )); then
-    AIBOX_ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/aibox-env.XXXXXX")" || {
+    aibox_tmp_dir
+    AIBOX_ENV_FILE="$AIBOX_TMP_DIR/env-file"
+    : > "$AIBOX_ENV_FILE" || {
         echo "错误: 无法创建自定义环境变量临时文件。" >&2
         exit 1
     }
-    trap aibox_cleanup_env_file EXIT
-    trap 'exit 129' HUP
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
     chmod 600 "$AIBOX_ENV_FILE" || {
         echo "错误: 无法设置自定义环境变量临时文件权限。" >&2
         exit 1
