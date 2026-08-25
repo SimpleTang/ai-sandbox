@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.local.clipbridge</string>
+
+	<!-- __LANG__ / __SCRIPT__ 由 install-host.sh 在安装时替换。
+	     默认走 JXA(clipbridge.js):它用 NSPasteboard.changeCount 检测剪贴板变化,
+	     那是个 O(1) 的整数;AppleScript 只能用 clipboard info,而后者会把图渲染一遍,
+	     实测每轮约 1.5 秒并持续占用 CPU。AppleScript 版保留作退路,
+	     用 CLIPBRIDGE_IMPL=applescript aibox clip install 切换。 -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/osascript</string>
+		<string>-l</string>
+		<string>__LANG__</string>
+		<string>__SCRIPT__</string>
+	</array>
+
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+
+	<!-- 低优先级后台任务,避免和前台程序抢资源 -->
+	<key>ProcessType</key>
+	<string>Background</string>
+
+	<!-- run 处理器是死循环、永不返回,stdout 本来就是空的;clipbridge.log 交给
+	     AppleScript 自己写状态与错误,避免两边抢同一个文件 -->
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+	<key>StandardErrorPath</key>
+	<string>__LOGDIR__/clipbridge.err</string>
+</dict>
+</plist>

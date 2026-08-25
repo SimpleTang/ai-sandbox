@@ -1,0 +1,15 @@
+[Unit]
+Description=aibox persistent development machine proxy
+After=network-online.target
+
+[Service]
+Type=simple
+User=aibox-gost
+Group=aibox-gost
+ExecStart=/usr/local/sbin/aibox-dev-proxy-run
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

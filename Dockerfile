@@ -26,6 +26,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         less \
         vim \
         sudo \
+        iptables \
+        util-linux \
         python3 \
         python3-pip \
         tzdata \
@@ -111,19 +113,25 @@ ENV CLAUDE_CONFIG_DIR=/home/node/.claude
 # 若 /home/node/.m2 不存在,容器运行时会以 root 自动补建这个中间目录,
 # 导致 entrypoint(node 用户)往里写 settings.xml 时 Permission denied、容器启动即退。
 # 在镜像里先建好并 chown,运行时就只做挂载、不再补建。.gradle 同理顺手建上。
-RUN mkdir -p /home/node/.m2 /home/node/.gradle \
-    && chown node:node /home/node/.m2 /home/node/.gradle
+RUN mkdir -p /home/node/.m2 /home/node/.gradle /run/aibox \
+    && chown node:node /home/node/.m2 /home/node/.gradle \
+    && chmod 0711 /run/aibox
 
-# ---- 让 node 用户免密 sudo:entrypoint 要在运行期做两件 root-only 的事 ----
-# 容器以 node(非 root)运行,但「设系统时区(/etc/localtime,ipcheck 看的是这个)」和
-# 「关 IPv6(sysctl)」都需要 root。给 node 配 NOPASSWD sudo,entrypoint 用 `sudo -n` 完成。
-# 因此 node 用户在容器内拥有免密 sudo;使用者应把容器及其可写挂载视为受信任执行环境。
+# gost 使用独立 UID 建立唯一允许直连外网的连接。普通 node 进程只能访问
+# loopback 上的本地 HTTP 代理,忽略代理环境变量也无法绕过防火墙。
+RUN useradd --system --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin aibox-gost
+
+# ---- 直连模式保留 sudo;代理模式会在 entrypoint 初始化后撤销 ----
+# entrypoint 以 root 启动,完成系统时区、IPv6 和可选防火墙设置后降权到 node。
+# 直连模式保留原有开发体验;代理模式删除此 sudoers 文件并启用 no_new_privs,
+# 防止容器进程提权清空强制代理防火墙。
 RUN echo 'node ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/node \
     && chmod 0440 /etc/sudoers.d/node
 
 # ---- 名称解析优先 IPv4 ----
 # 作为「关 IPv6」的兜底:即便运行期 sysctl 关不掉,getaddrinfo 也优先返回 IPv4,
-# 让工具走 IPv4。(entrypoint 里还会用 sudo sysctl 真正关掉 IPv6。)
+# 让工具走 IPv4。(entrypoint 的 root 初始化阶段还会尝试真正关掉 IPv6。)
 RUN echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
 
 # ============ 最重、最常变的层:两个 AI CLI ============
@@ -135,9 +143,9 @@ RUN echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
 # 输出对比结果并在确认后改写这两行;实际升级安装由 Dockerfile.update 增量完成
 # (见文件头注释),这两行保证之后任何一次全量重建都复现相同版本。
 # npm 官方源在 builder 里可能同样解析不稳,改用淘宝镜像(通常不被污染)。
-# 注意:npm install -g 写 /usr/local,须以 root 执行,故必须在下面 `USER node` 之前。
-ARG CLAUDE_CODE_VERSION=2.1.210
-ARG CODEX_VERSION=0.144.4
+# 注意:npm install -g 写 /usr/local,须以 root 执行。
+ARG CLAUDE_CODE_VERSION=2.1.233
+ARG CODEX_VERSION=0.147.0
 RUN npm config set registry https://registry.npmmirror.com \
     && npm install -g \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
@@ -148,11 +156,29 @@ RUN npm config set registry https://registry.npmmirror.com \
 # 特意放在 npm 层「之后」:entrypoint.sh 偶尔改动时不会连累重装两个 CLI;
 # 反过来 CLI 升级触发的这层 re-COPY 只是本地文件拷贝,无网络开销,可忽略。
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY network-lockdown.sh /usr/local/sbin/aibox-network-lockdown
+COPY user-exec.sh /usr/local/bin/aibox-user-exec
+COPY enter-shell.sh /usr/local/sbin/aibox-enter-shell
 
-# 用非 root 用户运行,避免容器内生成的文件在宿主机上属于 root。
-# 使用 node 基础镜像自带的非 root 用户;挂载目录权限仍取决于容器运行时的映射方式。
-USER node
+# ---- 剪贴板图片桥接:冒充 xclip,让沙箱里的 Claude Code 支持 Ctrl+V 贴图 ----
+# 终端只能把「文本」当键盘输入送进 tty,图片传不过来;要贴图必须由程序自己读操作系统
+# 剪贴板,而沙箱里既没有 X11/Wayland 也够不到 macOS 剪贴板。Claude Code 在 Linux 下
+# 贴图恰好是 sh -c 调 `xclip -t TARGETS/-t image/png`,且不检查 DISPLAY,于是这里放一个
+# 同名垫片,数据源换成宿主机侧常驻监听写出的 PNG。宿主机那一半装不进镜像,
+# 由 `aibox clip install` 在 macOS 上安装。详见 clipboard-bridge/README.md。
+COPY clipboard-bridge/xclip-shim.sh /usr/local/bin/xclip
+COPY clipboard-bridge/img.sh /usr/local/bin/aibox-img
+
+RUN chmod 0755 \
+        /usr/local/bin/entrypoint.sh \
+        /usr/local/bin/aibox-user-exec \
+        /usr/local/sbin/aibox-network-lockdown \
+        /usr/local/sbin/aibox-enter-shell \
+        /usr/local/bin/xclip \
+        /usr/local/bin/aibox-img
+
+# entrypoint 需要 root 初始化网络,执行用户命令前会不可逆地降权到 node。
+USER root
 
 # 项目会挂载到这里
 WORKDIR /workspace

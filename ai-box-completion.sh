@@ -6,20 +6,21 @@
 #
 # 效果:
 #   aibox <TAB>          -> 补全子命令(cc/codex/list/enter/update ...)
+#   aibox dev <TAB>      -> 补全持久开发机管理命令
 #   aibox enter <TAB>    -> 补全「正在运行的容器名」和「项目名」
 #   aibox update <TAB>   -> 补全 cc / codex
 #
 # 说明:补全候选来自 `container ls -q`(只列运行中的),和 aibox enter 的匹配口径一致;
-#       项目名由容器名 ai-<项目>-<6位时间戳> 反推。enter 也支持纯数字编号,那个太短、
+#       项目名由容器名 aibox-<项目>-<6位时间戳>-<进程号> 反推。enter 也支持纯数字编号,那个太短、
 #       无需补全,这里只补全名字。
 
 # 运行中的 aibox 容器名(完整名)
 _aibox_running() {
-    container ls -q 2>/dev/null | grep '^ai-'
+    container ls -q 2>/dev/null | grep '^aibox-'
 }
-# 由完整名反推项目名(去掉 ai- 前缀与末尾 -<6位数字>)
+# 由完整名反推项目名(去掉 aibox- 前缀与末尾 -<6位时间戳>-<进程号>)
 _aibox_projects() {
-    _aibox_running | sed -E 's/^ai-(.*)-[0-9]{6}$/\1/'
+    _aibox_running | sed -E 's/^aibox-(.*)-[0-9]{6}-[0-9]+$/\1/'
 }
 # enter 的候选 = 完整容器名 + 项目名,去重
 _aibox_enter_candidates() {
@@ -33,7 +34,23 @@ _aibox_complete() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     if [[ "$COMP_CWORD" -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "cc claude codex list ls enter stop logs clear prune start build update version status help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "cc claude codex dev clip list ls enter stop logs clear prune start build update version status help" -- "$cur") )
+        return 0
+    fi
+    if [[ "${COMP_WORDS[1]:-}" == "dev" ]]; then
+        if [[ "$COMP_CWORD" -eq 2 ]]; then
+            COMPREPLY=( $(compgen -W "build start restart exec update version set status stop delete rm logs help" -- "$cur") )
+        elif [[ "${COMP_WORDS[2]:-}" == "logs" ]]; then
+            COMPREPLY=( $(compgen -W "-f --follow --boot -n" -- "$cur") )
+        elif [[ "${COMP_WORDS[2]:-}" == "update" || "${COMP_WORDS[2]:-}" == "version" ]]; then
+            COMPREPLY=( $(compgen -W "cc codex" -- "$cur") )
+        elif [[ "${COMP_WORDS[2]:-}" == "set" ]]; then
+            COMPREPLY=( $(compgen -W "memory=8G cpus=4" -- "$cur") )
+        elif [[ "${COMP_WORDS[2]:-}" == "build" ]]; then
+            COMPREPLY=( $(compgen -W "--no-cache" -- "$cur") )
+        else
+            COMPREPLY=()
+        fi
         return 0
     fi
     case "$prev" in
@@ -42,6 +59,7 @@ _aibox_complete() {
                 COMPREPLY=( $(compgen -W "$(_aibox_enter_candidates)" -- "$cur") ) ;;
         stop)   COMPREPLY=( $(compgen -W "$(_aibox_enter_candidates) --all" -- "$cur") ) ;;
         update) COMPREPLY=( $(compgen -W "cc codex" -- "$cur") ) ;;
+        clip)   COMPREPLY=( $(compgen -W "install uninstall status restart doctor" -- "$cur") ) ;;
         build)  COMPREPLY=( $(compgen -W "--no-cache" -- "$cur") ) ;;
         *)      COMPREPLY=() ;;
     esac

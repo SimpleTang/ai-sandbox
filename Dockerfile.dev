@@ -1,0 +1,48 @@
+ARG BASE_IMAGE=ai-sandbox:latest
+FROM ${BASE_IMAGE}
+
+# Apple container machine boots /sbin/init and provisions a host-matching user
+# on first boot. The ordinary aibox entrypoint is intentionally not involved.
+ENV container=container
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        dbus \
+        systemd \
+        systemd-sysv \
+        openssh-server \
+        iproute2 \
+        iputils-ping \
+        net-tools \
+        wget \
+        man-db \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN : > /etc/machine-id \
+    && : > /var/lib/dbus/machine-id \
+    && systemctl set-default multi-user.target \
+    && systemctl mask \
+        dev-hugepages.mount \
+        sys-fs-fuse-connections.mount \
+        systemd-update-utmp.service \
+        systemd-tmpfiles-setup.service \
+        console-getty.service \
+        systemd-binfmt.service
+
+# The base image points Claude at the ephemeral node user's credential path.
+# A machine login instead uses the host-matching user's mounted home directory.
+COPY dev-profile.sh /etc/profile.d/aibox-dev.sh
+COPY dev-shell.sh /usr/local/bin/aibox-dev-shell
+COPY dev-configure.sh /usr/local/sbin/aibox-dev-configure
+COPY dev-proxy-run.sh /usr/local/sbin/aibox-dev-proxy-run
+COPY dev-tools.sh /usr/local/sbin/aibox-dev-tools
+COPY aibox-dev-proxy.service /etc/systemd/system/aibox-dev-proxy.service
+RUN chmod 0644 /etc/profile.d/aibox-dev.sh \
+        /etc/systemd/system/aibox-dev-proxy.service \
+    && chmod 0755 /usr/local/bin/aibox-dev-shell \
+        /usr/local/sbin/aibox-dev-configure \
+        /usr/local/sbin/aibox-dev-proxy-run \
+        /usr/local/sbin/aibox-dev-tools
+
+ENTRYPOINT ["/sbin/init"]
+CMD []

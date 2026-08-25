@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 容器入口:按 ai-box 传入的关键参数生效「代理 / 时区 / 语言」,打印启动横幅,再起 shell。
+# 容器入口:以 root 初始化网络/系统设置,不可逆降权到 node 后再启动用户命令。
 #
 # 由 ai-box(宿主机)通过 -e 传入(都可为空):
 #   AIBOX_PROXY   上游代理 URL(http/https/socks5/socks5h... gost 认的都行);空 = 直连
@@ -10,11 +10,111 @@
 # 可选:
 #   LOCAL_HTTP_PORT  容器内本地 HTTP 代理端口(默认 8080)
 #
-# 代理链路:遵循代理环境变量的程序连接本地 HTTP 端点,gost 再转发到 AIBOX_PROXY。
-# Maven/Gradle 另写代理配置;原始 socket 或忽略代理配置的程序不保证经过该链路。
+# 代理链路:所有普通进程只能连接 loopback 上的本地 HTTP 端点;防火墙只允许
+# 专用 aibox-gost UID 连接外网。忽略代理变量或使用原始 socket 也会被拒绝。
 set -euo pipefail
 
 LOCAL_HTTP_PORT="${LOCAL_HTTP_PORT:-8080}"
+export LOCAL_HTTP_PORT
+
+# ---- root 初始化阶段 ----
+# 镜像以 root 启动入口脚本。代理模式需要 CAP_NET_ADMIN;规则生效并启动 gost 后,
+# 删除 node 的 sudoers 规则,再清空 capability bounding set + no_new_privs 降权。
+if [[ "${AIBOX_ENTRYPOINT_PHASE:-}" != "user" ]]; then
+    if [[ "$(id -u)" -ne 0 ]]; then
+        echo "错误: 当前镜像仍以非 root 用户启动,无法安装强制代理防火墙。" >&2
+        echo "      本次升级修改了镜像权限模型,请先运行 aibox build 全量重建。" >&2
+        exit 1
+    fi
+
+    # 自定义用户变量绝不进入 root 入口环境;只把挂载内容复制给稍后的 node 阶段。
+    if [[ -f /run/aibox/user-env ]]; then
+        install -o node -g node -m 0600 \
+            /run/aibox/user-env /run/aibox/user-env-runtime
+    fi
+
+    # IPv6 即使无法通过 sysctl 关闭,代理模式的 ip6tables 仍会阻断直连。
+    for _k in all default lo; do
+        printf '1\n' > "/proc/sys/net/ipv6/conf/${_k}/disable_ipv6" 2>/dev/null || true
+    done
+    if [[ ! -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ]]; then
+        AIBOX_IPV6_SHOWN="已关闭(无 IPv6 栈)"
+    elif [[ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" == "1" ]]; then
+        AIBOX_IPV6_SHOWN="已关闭"
+    else
+        AIBOX_IPV6_SHOWN="未关闭"
+    fi
+
+    # 系统时区必须在降权前设置;用户阶段再导出 TZ 并写入 .bashrc。
+    AIBOX_TZ_SHOWN="镜像默认(${TZ:-UTC})"
+    if [[ -n "${AIBOX_TZ:-}" ]]; then
+        export TZ="$AIBOX_TZ"
+        sys_tz="仅CLI"
+        if [[ -e "/usr/share/zoneinfo/$AIBOX_TZ" ]]; then
+            ln -snf "/usr/share/zoneinfo/$AIBOX_TZ" /etc/localtime
+            printf '%s\n' "$AIBOX_TZ" > /etc/timezone
+            [[ "$(readlink /etc/localtime 2>/dev/null)" == *"/$AIBOX_TZ" ]] && sys_tz="系统+CLI"
+        fi
+        AIBOX_TZ_SHOWN="$AIBOX_TZ  [${AIBOX_TZ_SRC:-?}, $sys_tz]"
+    fi
+
+    AIBOX_NETWORK_SHOWN="直连(未启用出口防火墙)"
+    drop_privilege_args=()
+    if [[ -n "${AIBOX_PROXY:-}" ]]; then
+        if ! command -v gost >/dev/null 2>&1; then
+            echo "错误: 已配置 AIBOX_PROXY,但镜像中未安装 gost。" >&2
+            echo "      请将当前架构的 gost 二进制放到 third_party/gost,重新运行 aibox build。" >&2
+            exit 1
+        fi
+        if ! command -v setpriv >/dev/null 2>&1 || [[ ! -x /usr/local/sbin/aibox-network-lockdown ]]; then
+            echo "错误: 镜像缺少强制代理组件,请运行 aibox build 全量重建。" >&2
+            exit 1
+        fi
+
+        gost_uid="$(id -u aibox-gost)"
+        gost_gid="$(id -g aibox-gost)"
+        /usr/local/sbin/aibox-network-lockdown "$gost_uid"
+
+        # gost 是唯一可访问外网的 UID;日志不回显,避免上游 URL 或账密泄漏。
+        case "$AIBOX_PROXY" in
+            *\?*) gost_query_sep="&" ;;
+            *)    gost_query_sep="?" ;;
+        esac
+        setpriv --reuid="$gost_uid" --regid="$gost_gid" --clear-groups \
+            --bounding-set=-all --no-new-privs -- \
+            gost -L "http://127.0.0.1:${LOCAL_HTTP_PORT}" \
+                 -F "${AIBOX_PROXY}${gost_query_sep}retry=3&timeout=8s&so_keepalive=true" \
+                 >/tmp/gost.log 2>&1 &
+        gost_pid=$!
+        sleep 1
+        if ! kill -0 "$gost_pid" 2>/dev/null; then
+            echo "错误: gost 启动失败;为避免直连泄漏,容器拒绝继续启动。" >&2
+            exit 1
+        fi
+
+        # 普通进程既没有外网规则,也不能再通过 sudo/capability 修改防火墙。
+        rm -f /etc/sudoers.d/node
+        : > /run/aibox/proxy-lockdown
+        chmod 0400 /run/aibox/proxy-lockdown
+        drop_privilege_args=(--bounding-set=-all --no-new-privs)
+        AIBOX_NETWORK_SHOWN="强制代理(fail-closed, IPv4+IPv6)"
+    fi
+
+    export AIBOX_ENTRYPOINT_PHASE="user"
+    export AIBOX_IPV6_SHOWN AIBOX_TZ_SHOWN AIBOX_NETWORK_SHOWN
+    node_uid="$(id -u node)"
+    node_gid="$(id -g node)"
+    exec setpriv --reuid="$node_uid" --regid="$node_gid" --init-groups \
+        "${drop_privilege_args[@]}" -- \
+        env HOME=/home/node USER=node LOGNAME=node \
+        /usr/local/bin/entrypoint.sh "$@"
+fi
+
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "错误: aibox 入口脚本未能降权到 node。" >&2
+    exit 1
+fi
+
 BASHRC="$HOME/.bashrc"
 MAVEN_SETTINGS="$HOME/.m2/settings.xml"
 GRADLE_PROPERTIES="$HOME/.gradle/gradle.properties"
@@ -90,34 +190,12 @@ if [[ -n "$TOOLCHAIN_BIN_PATH" ]]; then
     printf 'export PATH="%s:$PATH"\n' "$TOOLCHAIN_BIN_PATH" >> "$BASHRC"
 fi
 
-# ---- 关闭 IPv6 ----
-# 需要 root,用 node 的免密 sudo(sudo -n 不会挂起)。直接写 /proc/sys(等价 sysctl -w,
-# 但不依赖 procps 是否装了 sysctl)。关不掉则靠 /etc/gai.conf 优先 IPv4 兜底。
-for _k in all default lo; do
-    echo 1 | sudo -n tee "/proc/sys/net/ipv6/conf/${_k}/disable_ipv6" >/dev/null 2>&1 || true
-done
-if [[ ! -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ]]; then
-    IPV6_SHOWN="已关闭(无 IPv6 栈)"
-elif [[ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" == "1" ]]; then
-    IPV6_SHOWN="已关闭"
-else
-    IPV6_SHOWN="未关闭,仅优先 IPv4(内核拒绝?)"
-fi
-
 # ---- 时区 ----
-# 同时设「系统时区」(/etc/localtime + /etc/timezone,ipcheck 判定的是这个)和
-# 「CLI 时区」(TZ 环境变量)。前者需 root,用 sudo。
-TZ_SHOWN="镜像默认(${TZ:-UTC})"
+# root 阶段已设置系统时区;这里持久化 shell 环境供 aibox enter 复用。
+TZ_SHOWN="${AIBOX_TZ_SHOWN:-镜像默认(${TZ:-UTC})}"
 if [[ -n "${AIBOX_TZ:-}" ]]; then
     export TZ="$AIBOX_TZ"
     echo "export TZ=$AIBOX_TZ" >> "$BASHRC"     # 让 aibox enter 的交互 shell 也一致
-    sys_tz="仅CLI"
-    if [[ -e "/usr/share/zoneinfo/$AIBOX_TZ" ]]; then
-        sudo -n ln -snf "/usr/share/zoneinfo/$AIBOX_TZ" /etc/localtime 2>/dev/null || true
-        printf '%s\n' "$AIBOX_TZ" | sudo -n tee /etc/timezone >/dev/null 2>&1 || true
-        [[ "$(readlink /etc/localtime 2>/dev/null)" == *"/$AIBOX_TZ" ]] && sys_tz="系统+CLI"
-    fi
-    TZ_SHOWN="$AIBOX_TZ  [${AIBOX_TZ_SRC:-?}, $sys_tz]"
 fi
 
 # ---- 语言 ----
@@ -144,23 +222,8 @@ fi
 
 # ---- 代理 ----
 if [[ -n "${AIBOX_PROXY:-}" ]]; then
-    if ! command -v gost >/dev/null 2>&1; then
-        echo "错误: 已配置 AIBOX_PROXY,但镜像中未安装 gost。" >&2
-        echo "      请将当前架构的 gost 二进制放到 third_party/gost,重新运行 aibox build。" >&2
-        exit 1
-    fi
-
     # 脱敏:socks5://user:pass@host -> socks5://***@host(用户名和密码都不显示)
     masked="$(printf '%s' "$AIBOX_PROXY" | sed -E 's#(://)[^/@]*@#\1***@#')"
-
-    # -L 本地监听 HTTP;-F 转发到上游(URL 决定协议)
-    #   retry=3      遇到瞬时连接失败时最多重试 3 次
-    #   timeout=8s   单次连接超时,超时即触发下一次重试
-    #   so_keepalive 保活,减少长连接被中断
-    gost -L "http://127.0.0.1:${LOCAL_HTTP_PORT}" \
-         -F "${AIBOX_PROXY}?retry=3&timeout=8s&so_keepalive=true" \
-         >/tmp/gost.log 2>&1 &
-    sleep 1     # 等 gost 起来
 
     # 为遵循标准代理环境变量的程序设置本地 HTTP 代理
     export HTTP_PROXY="http://127.0.0.1:${LOCAL_HTTP_PORT}"
@@ -248,9 +311,10 @@ echo "      目录 : ${AIBOX_HOST_DIR:-?}"
 echo "      挂载 : ${AIBOX_MOUNT:-?}"
 echo "      名称 : ${AIBOX_CONTAINER:-?}"
 echo "      代理 : ${PROXY_SHOWN}"
+echo "      网络 : ${AIBOX_NETWORK_SHOWN:-未知}"
 echo "      时区 : ${TZ_SHOWN}"
 echo "      语言 : ${LANG_SHOWN}"
-echo "      IPv6 : ${IPV6_SHOWN}"
+echo "      IPv6 : ${AIBOX_IPV6_SHOWN:-未知}"
 echo "==> ──────────────────────────────────"
 
-exec "$@"
+exec /usr/local/bin/aibox-user-exec "$@"

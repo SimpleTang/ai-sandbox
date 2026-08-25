@@ -6,6 +6,19 @@
 #   ai-box [/path]              # 挂载目录(默认当前)进容器,进 shell
 #   ai-box cc [/path]           # 进容器并直接启动 claude(cc 也可写作 claude)
 #   ai-box codex [/path]        # 进容器并直接启动 codex
+#   —— 持久开发机 ——
+#   ai-box dev                  # 创建/启动并进入持久 AI 开发机(宿主 Home 读写挂载)
+#   ai-box dev build            # 单独构建/重建持久开发机镜像
+#   ai-box dev start            # 创建/启动并刷新代理,不进入 shell
+#   ai-box dev restart          # 重启并刷新代理服务
+#   ai-box dev exec <cmd...>    # 在开发机内以普通用户执行命令
+#   ai-box dev update [cc|codex]# 升级开发机内的 AI CLI
+#   ai-box dev version          # 显示开发机内实际 CLI 版本
+#   ai-box dev set memory=8G cpus=4  # 调整资源(重启后生效)
+#   ai-box dev status           # 查看持久开发机状态
+#   ai-box dev stop             # 停止开发机,保留系统盘
+#   ai-box dev delete           # 删除开发机及持久系统盘(二次确认)
+#   ai-box dev logs [-f]        # 查看开发机日志
 #   —— 容器管理 ——
 #   ai-box list [-a]            # 列运行中的 aibox 容器(带编号;-a 含已停止;也可写作 ls)
 #   ai-box enter [编号|项目名|容器名]  # 进入运行中的容器(不带参则交互选编号;不新建容器)
@@ -14,16 +27,17 @@
 #   ai-box clear                # 清理已停止的 aibox 容器(也可写作 prune)
 #   —— 镜像 / 服务 ——
 #   ai-box start                # 启动 container 服务(= container system start)
-#   ai-box build [--no-cache]   # 构建/重建镜像(tag 与上下文写死;参数透传)
+#   ai-box build [--no-cache]   # 构建/重建一次性容器及开发机镜像
 #   ai-box update [cc|codex]    # 检查 CLI 新版,确认后在现有镜像上增量更新(不带参两个都查)
 #   ai-box version              # 显示 Dockerfile 声明的 CLI 目标版本
-#   ai-box status               # 一屏自检:服务 / 镜像 / 目标版本 / 运行中的容器
+#   ai-box status               # 一屏自检:服务 / 镜像 / 开发机 / 运行中的容器
 #   ai-box help                 # 命令速查(也认 -h / --help)
 #
-# 带子命令时,工具退出后留在容器 shell,再 exit 才销毁容器。
+# 默认模式带 cc/codex 时,工具退出后留在容器 shell,再 exit 才销毁容器。
 #
 # 多窗口:每次运行都是一个独立容器,可同时开多个窗口跑不同项目。
-#   容器命名为 ai-<项目名>-<时间戳>,降低多窗口重名概率;提示符也显示项目名。
+#   容器命名为 aibox-<项目名>-<时间戳>-<进程号>,并带专用 label;
+#   管理命令只识别该命名空间,不会误操作其他 ai-* 容器。
 #
 # 登录凭据:容器专属、可持久化,存在仓库的 creds/,
 #   独立于你宿主机自己的 ~/.claude / ~/.codex,容器里登录一次即可长期复用。
@@ -39,6 +53,11 @@
 set -euo pipefail
 
 IMAGE="ai-sandbox:latest"
+DEV_IMAGE="ai-sandbox-dev:latest"
+DEV_MACHINE_NAME="aibox-dev"
+DEV_MEMORY="8192M"
+CONTAINER_PREFIX="aibox-"
+CONTAINER_OWNER_LABEL="com.simpletang.ai-sandbox.managed=true"
 
 # 沙箱仓库目录 = 此脚本真实文件所在目录。逐层解析软链接,因此从 PATH 中的
 # aibox 链接调用也能定位正确的 Dockerfile、配置、凭据和缓存目录。
@@ -65,6 +84,20 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
   aibox cc [/path]             进沙箱并直接启动 claude(cc 也可写作 claude)
   aibox codex [/path]          进沙箱并直接启动 codex
 
+持久开发机:
+  aibox dev                    创建/启动并进入 aibox-dev(宿主 Home 读写挂载)
+  aibox dev build [--no-cache] 单独构建/重建持久开发机镜像
+  aibox dev start              创建/启动并刷新代理,不进入 shell
+  aibox dev restart            重启并刷新代理服务
+  aibox dev exec <cmd...>      以普通用户在开发机内执行命令
+  aibox dev update [cc|codex]  升级开发机内的 Claude Code / Codex
+  aibox dev version [cc|codex] 显示开发机内实际 CLI 版本
+  aibox dev set memory=8G cpus=4  调整资源(重启后生效)
+  aibox dev status             查看开发机状态
+  aibox dev stop               停止开发机,保留持久系统盘
+  aibox dev delete             删除开发机及持久系统盘(二次确认)
+  aibox dev logs [-f]          查看开发机日志
+
 容器管理:
   aibox list [-a]              列运行中的容器(带编号;-a 含已停止;也可写作 ls)
   aibox enter [编号|项目名|容器名]  进入运行中的容器(不带参则交互选编号;不新建容器)
@@ -74,15 +107,24 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
 
 镜像 / 服务:
   aibox start                  启动 container 服务(= container system start)
-  aibox build [--no-cache]     构建/重建镜像(tag 与上下文写死;参数透传)
+  aibox build [--no-cache]     构建/重建一次性容器镜像
   aibox update [cc|codex]      检查 CLI 新版,确认后增量更新镜像(不带参两个都查)
   aibox version                显示 Dockerfile 声明的 CLI 目标版本
-  aibox status                 一屏自检:服务 / 镜像 / 目标版本 / 运行中的容器
+  aibox status                 一屏自检:服务 / 镜像 / 开发机 / 运行中的容器
+
+剪贴板贴图:
+  aibox clip install           在 macOS 上启用剪贴板图片桥接(两种模式都生效)
+  aibox clip status            查看桥接状态;uninstall 卸载,restart 重启监听
+  aibox clip doctor            贴不上图时的诊断(在 macOS 前台重跑一遍监听的动作)
 
   aibox help                   显示本帮助(也认 -h / --help)
 
 说明:
+  · dev 是一台长期存在的 Linux 开发机,不绑定单个项目;项目可在机内自行选择。
+  · dev 隔离系统环境,但不隔离宿主 Home 数据;机内进程可读写整个宿主 Home。
   · stop/logs/enter 的目标标识统一:编号(取自 aibox list)、项目名、或完整容器名。
+  · 沙箱里 Claude Code 要贴宿主机剪贴板里的图,先 aibox clip install,然后按 Ctrl+V
+    (不是 ⌘V —— ⌘V 会被终端截走当文本粘贴)。详见 clipboard-bridge/README.md。
   · Tab 补全:在 ~/.zshrc 或 ~/.bashrc 里 source "$SANDBOX_DIR/ai-box-completion.sh"
   · 代理/时区/语言/自定义环境变量在 "$SANDBOX_DIR/aibox.conf" 配。
 HELP
@@ -198,19 +240,389 @@ if [[ "${1:-}" == "update" ]]; then
     exit 0
 fi
 
+# ---- 子命令:dev —— 基于 container machine 的持久 AI 开发机 ----
+# machine 的根文件系统跨 stop/run 保留,并由 Apple container 在首次启动时创建
+# 与宿主 UID/GID 匹配、可免密 sudo 的用户。Home 按产品语义显式读写挂载,因此
+# 这是「系统环境隔离」而不是「宿主数据隔离」。它不参与下面一次性容器的管理命令。
+aibox_dev_probe() {
+    local machine_output
+    AIBOX_DEV_STATE=""
+    AIBOX_DEV_ERROR=""
+    if ! machine_output="$(container machine list -q 2>&1)"; then
+        AIBOX_DEV_STATE="error"
+        AIBOX_DEV_ERROR="$machine_output"
+    elif grep -qxF "$DEV_MACHINE_NAME" <<< "$machine_output"; then
+        AIBOX_DEV_STATE="exists"
+    else
+        AIBOX_DEV_STATE="missing"
+    fi
+}
+
+aibox_dev_require_exists() {
+    aibox_dev_probe
+    case "$AIBOX_DEV_STATE" in
+        exists) return 0 ;;
+        missing)
+            echo "持久开发机 $DEV_MACHINE_NAME 尚未创建。运行 aibox dev 创建。" >&2
+            return 1
+            ;;
+        error)
+            echo "错误: 无法查询持久开发机。" >&2
+            [[ -n "$AIBOX_DEV_ERROR" ]] && echo "      $AIBOX_DEV_ERROR" >&2
+            return 1
+            ;;
+    esac
+}
+
+# machine run 会自动开机，但首次进程可能早于 systemd manager socket 就绪。
+# 在宿主启动器侧等待，使已存在的旧开发机无需重建也能避开冷启动竞态。
+aibox_dev_wait_systemd() {
+    local ready_output
+    if ! ready_output="$(container machine run --name "$DEV_MACHINE_NAME" --root \
+        /bin/bash -c '
+            attempt=0
+            while (( attempt < 30 )); do
+                if systemctl show --property=SystemState --value >/dev/null 2>&1; then
+                    exit 0
+                fi
+                attempt=$((attempt + 1))
+                sleep 1
+            done
+            echo "aibox dev systemd readiness timed out" >&2
+            exit 1
+        ' 2>&1)"; then
+        echo "错误: 持久开发机启动后 systemd 未能在 30 秒内就绪。" >&2
+        [[ -n "$ready_output" ]] && echo "      $ready_output" >&2
+        return 1
+    fi
+}
+
+# 取文件 mtime(epoch 秒)。GNU 与 BSD 的 stat 参数不通用,而且 GNU 的 -f 是「显示文件系统
+# 信息」—— 它会「成功」并吐出一堆无关内容,不会触发 || 兜底,所以必须逐个校验是不是纯数字。
+aibox_file_mtime() {
+    local target="$1" value
+    value="$(stat -c %Y "$target" 2>/dev/null)" || value=""
+    if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+        value="$(stat -f %m "$target" 2>/dev/null)" || value=""
+    fi
+    [[ "$value" =~ ^[0-9]+$ ]] || value=0
+    printf '%s' "$value"
+}
+
+# ---- 剪贴板图片桥接:状态自检(aibox status 与 aibox dev status 共用)----
+# 纯只读检查,不启动也不修改任何东西。沙箱侧的 xclip 垫片烧在镜像里、没有运行期状态,
+# 会出问题的只有宿主机这半截:装没装、还活着没、此刻剪贴板里有没有图。
+aibox_clip_status_line() {
+    local bridge="$HOME/.clipboard-bridge"
+    local label="com.local.clipbridge"
+    local loaded=0 heartbeat age
+
+    launchctl print "gui/$(id -u)/$label" >/dev/null 2>&1 && loaded=1
+
+    if [[ ! -d "$bridge" ]]; then
+        if (( loaded )); then
+            printf '异常:监听已加载但桥接目录不存在(试 aibox clip restart)\n'
+        else
+            printf '未启用(aibox clip install 开启后可在沙箱里 Ctrl+V 贴图)\n'
+        fi
+        return 0
+    fi
+
+    # 心跳由宿主机侧监听约每 5 秒更新一次
+    if [[ -f "$bridge/alive" ]]; then
+        heartbeat="$(aibox_file_mtime "$bridge/alive")"
+        age=$(( $(date +%s) - heartbeat ))
+    else
+        age=-1
+    fi
+
+    if (( age < 0 )); then
+        if (( loaded )); then
+            printf '异常:监听已加载但没有心跳(看 %s/clipbridge.err)\n' "$bridge"
+        else
+            printf '未启用(桥接目录已在,但监听没跑;试 aibox clip install)\n'
+        fi
+    elif (( age > 30 )); then
+        printf '异常:心跳 %s 秒未更新,监听可能已停(试 aibox clip restart)\n' "$age"
+    elif [[ -s "$bridge/clipboard.png" && -f "$bridge/targets" ]]; then
+        printf '已启用,当前剪贴板有图(沙箱里按 Ctrl+V 粘贴)\n'
+    else
+        printf '已启用,当前剪贴板无图\n'
+    fi
+}
+
+aibox_dev_json_value() {
+    local json="$1" key value
+    shift
+    for key in "$@"; do
+        if value="$(printf '%s' "$json" \
+            | /usr/bin/plutil -extract "$key" raw -o - - 2>/dev/null)"; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done
+    return 1
+}
+
+aibox_dev_format_size() {
+    local size="$1" unit whole decimal
+    if [[ "$size" =~ ^[0-9]+$ ]]; then
+        if (( size >= 1073741824 )); then
+            unit=1073741824
+            whole=$((size / unit))
+            decimal=$((((size % unit) * 10 + unit / 2) / unit))
+            if (( decimal == 10 )); then
+                whole=$((whole + 1))
+                decimal=0
+            fi
+            if (( decimal == 0 )); then
+                printf '%d GiB\n' "$whole"
+            else
+                printf '%d.%d GiB\n' "$whole" "$decimal"
+            fi
+        elif (( size >= 1048576 )); then
+            unit=1048576
+            whole=$((size / unit))
+            decimal=$((((size % unit) * 10 + unit / 2) / unit))
+            if (( decimal == 10 )); then
+                whole=$((whole + 1))
+                decimal=0
+            fi
+            if (( decimal == 0 )); then
+                printf '%d MiB\n' "$whole"
+            else
+                printf '%d.%d MiB\n' "$whole" "$decimal"
+            fi
+        else
+            printf '%s 字节\n' "$size"
+        fi
+    else
+        printf '%s\n' "$size"
+    fi
+}
+
+aibox_dev_print_status() {
+    local inspect_output raw_state normalized_state state cpus memory disk_size
+    local home_mount home_description image ip_address platform_os platform_arch
+    local username uid gid created_date started_date
+    if ! inspect_output="$(container machine inspect "$DEV_MACHINE_NAME" 2>&1)"; then
+        echo "错误: 无法读取持久开发机详情。" >&2
+        [[ -n "$inspect_output" ]] && echo "      $inspect_output" >&2
+        return 1
+    fi
+
+    raw_state="$(aibox_dev_json_value "$inspect_output" \
+        0.status status state runtimeStatus runtime.status runtime.state 2>/dev/null || true)"
+    normalized_state="$(printf '%s' "$raw_state" | tr '[:upper:]' '[:lower:]')"
+    case "$normalized_state" in
+        running|started|up)    state="运行中" ;;
+        stopped|exited|down)   state="已停止" ;;
+        starting|booting)      state="启动中" ;;
+        stopping|shuttingdown) state="停止中" ;;
+        *)                     state="未知" ;;
+    esac
+
+    cpus="$(aibox_dev_json_value "$inspect_output" \
+        0.cpus configuration.cpus configuration.cpuCount config.cpus config.cpuCount \
+        cpus cpuCount 2>/dev/null || true)"
+    memory="$(aibox_dev_json_value "$inspect_output" \
+        0.memory 0.memoryInBytes 0.memoryBytes \
+        configuration.memoryInBytes configuration.memoryBytes configuration.memory \
+        config.memoryInBytes config.memoryBytes config.memory \
+        memoryInBytes memoryBytes memory 2>/dev/null || true)"
+    [[ -n "$memory" ]] && memory="$(aibox_dev_format_size "$memory")"
+    disk_size="$(aibox_dev_json_value "$inspect_output" 0.diskSize diskSize 2>/dev/null || true)"
+    [[ -n "$disk_size" ]] && disk_size="$(aibox_dev_format_size "$disk_size")"
+    home_mount="$(aibox_dev_json_value "$inspect_output" 0.homeMount homeMount 2>/dev/null || true)"
+    case "$home_mount" in
+        rw)   home_description="读写（宿主 Home）" ;;
+        ro)   home_description="只读（宿主 Home）" ;;
+        "")   home_description="未知" ;;
+        *)    home_description="$home_mount" ;;
+    esac
+    image="$(aibox_dev_json_value "$inspect_output" 0.image.reference image.reference 2>/dev/null || true)"
+    ip_address="$(aibox_dev_json_value "$inspect_output" 0.ipAddress ipAddress 2>/dev/null || true)"
+    platform_os="$(aibox_dev_json_value "$inspect_output" 0.platform.os platform.os 2>/dev/null || true)"
+    platform_arch="$(aibox_dev_json_value "$inspect_output" 0.platform.architecture platform.architecture 2>/dev/null || true)"
+    username="$(aibox_dev_json_value "$inspect_output" 0.userSetup.username userSetup.username 2>/dev/null || true)"
+    uid="$(aibox_dev_json_value "$inspect_output" 0.userSetup.uid userSetup.uid 2>/dev/null || true)"
+    gid="$(aibox_dev_json_value "$inspect_output" 0.userSetup.gid userSetup.gid 2>/dev/null || true)"
+    created_date="$(aibox_dev_json_value "$inspect_output" 0.createdDate createdDate 2>/dev/null || true)"
+    started_date="$(aibox_dev_json_value "$inspect_output" 0.startedDate startedDate 2>/dev/null || true)"
+
+    echo "== 持久开发机状态 =="
+    echo "  名称       : $DEV_MACHINE_NAME"
+    echo "  运行状态   : $state"
+    echo "  镜像       : ${image:-未知}"
+    if [[ -n "$platform_os" || -n "$platform_arch" ]]; then
+        echo "  平台       : ${platform_os:-?}/${platform_arch:-?}"
+    else
+        echo "  平台       : 未知"
+    fi
+    if [[ -n "$cpus" ]]; then
+        echo "  CPU        : $cpus 核"
+    else
+        echo "  CPU        : 未知"
+    fi
+    echo "  内存       : ${memory:-未知}"
+    echo "  系统盘     : ${disk_size:-未知}（持久保留）"
+    echo "  IP 地址    : ${ip_address:-未分配}"
+    echo "  Home 挂载  : $home_description"
+    echo "  剪贴板贴图 : $(aibox_clip_status_line)"
+    if [[ -n "$username" || -n "$uid" || -n "$gid" ]]; then
+        echo "  开发用户   : ${username:-未知}（UID ${uid:-?} / GID ${gid:-?}）"
+    else
+        echo "  开发用户   : 未知"
+    fi
+    echo "  创建时间   : ${created_date:-未知}"
+    echo "  启动时间   : ${started_date:-未启动}"
+}
+
+AIBOX_DEV_ACTION=""
+AIBOX_DEV_TARGET="all"
+AIBOX_DEV_COMMAND=()
+if [[ "${1:-}" == "dev" ]]; then
+    dev_action="${2:-}"
+    case "$dev_action" in
+        "")
+            [[ $# -eq 1 ]] || { echo "用法: aibox dev" >&2; exit 2; }
+            AIBOX_DEV_ACTION="shell"
+            ;;
+        start|restart)
+            [[ $# -eq 2 ]] || { echo "用法: aibox dev $dev_action" >&2; exit 2; }
+            AIBOX_DEV_ACTION="$dev_action"
+            ;;
+        build)
+            shift 2
+            if ! container image inspect "$IMAGE" >/dev/null 2>&1; then
+                echo "错误: 找不到基础镜像 ${IMAGE}。" >&2
+                echo "      请先运行 aibox build，再运行 aibox dev build。" >&2
+                exit 1
+            fi
+            if [[ $# -gt 0 ]]; then
+                echo "==> 构建持久开发机镜像 $DEV_IMAGE(附加参数: $*)"
+            else
+                echo "==> 构建持久开发机镜像 $DEV_IMAGE"
+            fi
+            ( cd "$SANDBOX_DIR" && container build "$@" -f Dockerfile.dev \
+                --build-arg BASE_IMAGE="$IMAGE" -t "$DEV_IMAGE" . )
+            exit $?
+            ;;
+        exec)
+            if [[ $# -lt 3 ]]; then
+                echo "用法: aibox dev exec <command> [args...]" >&2
+                exit 2
+            fi
+            AIBOX_DEV_ACTION="exec"
+            AIBOX_DEV_COMMAND=("${@:3}")
+            ;;
+        update|version)
+            [[ $# -le 3 ]] || { echo "用法: aibox dev $dev_action [cc|codex]" >&2; exit 2; }
+            case "${3:-}" in
+                "")       AIBOX_DEV_TARGET="all" ;;
+                cc|claude) AIBOX_DEV_TARGET="claude" ;;
+                codex)     AIBOX_DEV_TARGET="codex" ;;
+                *) echo "用法: aibox dev $dev_action [cc|codex]" >&2; exit 2 ;;
+            esac
+            AIBOX_DEV_ACTION="$dev_action"
+            ;;
+        status)
+            [[ $# -eq 2 ]] || { echo "用法: aibox dev status" >&2; exit 2; }
+            aibox_dev_probe
+            if [[ "$AIBOX_DEV_STATE" == "missing" ]]; then
+                echo "持久开发机 $DEV_MACHINE_NAME 尚未创建。运行 aibox dev 创建。"
+                exit 0
+            elif [[ "$AIBOX_DEV_STATE" == "error" ]]; then
+                echo "错误: 无法查询持久开发机。" >&2
+                [[ -n "$AIBOX_DEV_ERROR" ]] && echo "      $AIBOX_DEV_ERROR" >&2
+                exit 1
+            fi
+            aibox_dev_print_status
+            exit $?
+            ;;
+        stop)
+            [[ $# -eq 2 ]] || { echo "用法: aibox dev stop" >&2; exit 2; }
+            aibox_dev_require_exists || exit 1
+            echo "==> 停止持久开发机: $DEV_MACHINE_NAME(系统盘保留)"
+            exec container machine stop "$DEV_MACHINE_NAME"
+            ;;
+        delete|rm)
+            [[ $# -eq 2 ]] || { echo "用法: aibox dev $dev_action" >&2; exit 2; }
+            aibox_dev_require_exists || exit 1
+            echo "将删除持久开发机 $DEV_MACHINE_NAME 及其系统盘。"
+            read -r -p "确认删除?[y/N] " ans || true
+            if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+                echo "已取消。"
+                exit 0
+            fi
+            exec container machine delete "$DEV_MACHINE_NAME"
+            ;;
+        logs)
+            aibox_dev_require_exists || exit 1
+            shift 2
+            exec container machine logs "$@" "$DEV_MACHINE_NAME"
+            ;;
+        set)
+            aibox_dev_require_exists || exit 1
+            if [[ $# -lt 3 ]]; then
+                echo "用法: aibox dev set memory=<size> [cpus=<number>]" >&2
+                exit 2
+            fi
+            shift 2
+            for dev_setting in "$@"; do
+                if [[ "$dev_setting" =~ ^cpus=[1-9][0-9]*$ ]]; then
+                    :
+                elif [[ "$dev_setting" =~ ^memory=[1-9][0-9]*([KMGTPEmgtpe][iI]?[bB]?)?$ ]]; then
+                    :
+                else
+                    echo "错误: 不支持的开发机资源设置 '$dev_setting'。" >&2
+                    echo "      只接受 memory=<size> 和 cpus=<number>。" >&2
+                    exit 2
+                fi
+            done
+            container machine set --name "$DEV_MACHINE_NAME" "$@"
+            echo "==> 开发机资源配置已更新;运行 aibox dev restart 后生效。"
+            exit 0
+            ;;
+        help|-h|--help)
+            cat <<'HELP'
+用法:
+  aibox dev                    创建/启动并进入持久 AI 开发机
+  aibox dev start              创建/启动并刷新代理,不进入 shell
+  aibox dev restart            重启并刷新代理服务
+  aibox dev exec <cmd...>      以普通用户在开发机内执行命令
+  aibox dev update [cc|codex]  升级开发机内的 AI CLI
+  aibox dev version [cc|codex] 显示开发机内实际 CLI 版本
+  aibox dev set memory=8G cpus=4  调整资源(重启后生效)
+  aibox dev status             查看状态
+  aibox dev stop               停止并保留系统盘
+  aibox dev delete             删除开发机及系统盘(也可写作 rm)
+  aibox dev logs [-f]          查看日志
+HELP
+            exit 0
+            ;;
+        *)
+            echo "用法: aibox dev [start|restart|exec|update|version|set|status|stop|delete|logs|help]" >&2
+            exit 2
+            ;;
+    esac
+
+fi
+
 # ---- list / enter 共用:枚举 + 反推 helper ----
 # 运行中的 aibox 容器名,按名字排序 —— 保证 list / 交互选择 / enter <编号> 三处编号一致。
-# 用 `container ls -q` 只取容器 ID(= 我们 --name 设的 ai-<项目>-<时间戳>),不解析表格/JSON。
+# 用项目专用的 aibox- 前缀划定所有权;旧版 ai-* 和其他工具的容器不会被管理命令选中。
 aibox_names() {
-    container ls -q 2>/dev/null | grep '^ai-' | sort || true
+    container ls -q 2>/dev/null | grep "^${CONTAINER_PREFIX}" | sort || true
 }
 # 从容器名反推「项目名 / 启动时刻」,结果写进全局 REPLY_PROJ / REPLY_STARTED。
-# 项目名本身含 - 也没关系(时间戳恒为末尾 6 位数字,从右侧剥离)。
+# 项目名本身含 - 也没关系;末尾固定为 6 位时间戳和数字进程号。
 aibox_parse() {
-    local rest="${1#ai-}" ts="${1##*-}"
-    ts="${ts:0:6}"
-    if [[ "${1##*-}" =~ ^[0-9]{6}$ ]]; then
-        REPLY_PROJ="${rest%-*}"
+    local rest="${1#${CONTAINER_PREFIX}}" without_pid ts
+    without_pid="${rest%-*}"
+    ts="${without_pid##*-}"
+    if [[ "$rest" =~ ^.+-[0-9]{6}-[0-9]+$ ]]; then
+        REPLY_PROJ="${without_pid%-*}"
         REPLY_STARTED="${ts:0:2}:${ts:2:2}:${ts:4:2}"
     else
         REPLY_PROJ="$rest"; REPLY_STARTED="?"   # 名字不符合命名规则时的兜底
@@ -235,7 +647,7 @@ aibox_print() {
 }
 # 含已停止在内的全部 aibox 容器名(排序)。供 list -a / clear 用。
 aibox_names_all() {
-    container ls -a -q 2>/dev/null | grep '^ai-' | sort || true
+    container ls -a -q 2>/dev/null | grep "^${CONTAINER_PREFIX}" | sort || true
 }
 # 把「编号 | 项目名 | 完整容器名」解析成唯一容器名(供 enter / stop / logs 共用)。
 # 依赖调用方已 aibox_load 填好 AIBOX_LIST(运行中、已排序)。
@@ -268,12 +680,39 @@ aibox_resolve_one() {
     return 1
 }
 
+# ---- 子命令:clip —— 剪贴板图片桥接的宿主机侧(macOS launchd 常驻监听)----
+# 沙箱侧的 xclip 垫片已经烧进镜像,构建完就在;宿主机这半截是 macOS 上的常驻进程,
+# 装不进任何镜像,只能在这里装。装一次,aibox 与 aibox dev 两种模式都生效。
+# 原理与排错见 clipboard-bridge/README.md。
+if [[ "${1:-}" == "clip" ]]; then
+    clip_action="${2:-status}"
+    # 先校验动作再找安装器:参数写错时应当直接给出用法,而不是被「文件缺失」盖住。
+    case "$clip_action" in
+        install|uninstall|status|restart|doctor) ;;
+        *) echo "用法: aibox clip [install|uninstall|status|restart|doctor]" >&2; exit 2 ;;
+    esac
+    [[ $# -le 2 ]] || { echo "用法: aibox clip [install|uninstall|status|restart|doctor]" >&2; exit 2; }
+    # doctor 走单独的诊断脚本:它在前台重跑一遍监听做的事,用来区分「脚本逻辑错」
+    # 和「后台运行上下文/权限读不到剪贴板」——后者在前台会当场弹授权提示。
+    if [[ "$clip_action" == "doctor" ]]; then
+        clip_doctor="$SANDBOX_DIR/clipboard-bridge/diagnose.sh"
+        [[ -x "$clip_doctor" ]] || { echo "错误: 找不到可执行的 $clip_doctor" >&2; exit 1; }
+        exec "$clip_doctor"
+    fi
+    clip_installer="$SANDBOX_DIR/clipboard-bridge/install-host.sh"
+    if [[ ! -x "$clip_installer" ]]; then
+        echo "错误: 找不到可执行的 $clip_installer" >&2
+        exit 1
+    fi
+    exec "$clip_installer" "$clip_action"
+fi
+
 # ---- 子命令:list —— 列出正在运行的 aibox 容器(-a 含已停止)----
 if [[ "${1:-}" == "list" || "${1:-}" == "ls" ]]; then
     if [[ "${2:-}" == "-a" || "${2:-}" == "--all" ]]; then
         # -a:列全部(含已停止),标出状态。此视图不带编号 —— 编号只服务于「运行中」列表
         # (即 enter/stop <编号> 的口径),不带 -a 时才显示编号,避免两套编号打架。
-        running="$(container ls -q 2>/dev/null | grep '^ai-' | sort || true)"
+        running="$(aibox_names)"
         all="$(aibox_names_all)"
         if [[ -z "$all" ]]; then
             echo "没有 aibox 容器(含已停止)。"
@@ -303,8 +742,8 @@ fi
 
 # ---- 子命令:enter —— 进入一个正在运行的容器 ----
 # 标识可以是:① 空(交互式列编号让你输数字)② 纯数字(list 里的编号)
-#             ③ 完整容器名 ④ 项目名(ai-<项目>-<6位时间戳>)。
-# 底层 `container exec -it -w /workspace/<项目> <name> bash`:
+#             ③ 完整容器名 ④ 项目名(aibox-<项目>-<6位时间戳>-<进程号>)。
+# 底层以 root 启动镜像内受信任 helper,由 helper 清 capability 后降权到 node:
 #   起的是交互 bash,会读容器内 ~/.bashrc —— entrypoint 启动时已把环境变量和
 #   [项目名] 提示符写进去了,所以进去的环境跟原窗口一致;启用代理时 gost 也无需重启。
 if [[ "${1:-}" == "enter" ]]; then
@@ -333,7 +772,8 @@ if [[ "${1:-}" == "enter" ]]; then
 
     aibox_parse "$match"    # 反推项目名 -> 落到项目工作目录
     echo "==> 进入容器: $match(项目 $REPLY_PROJ)。exit 只离开这个 shell,不销毁容器。"
-    exec container exec -it -w "/workspace/$REPLY_PROJ" "$match" bash
+    exec container exec -it -u root -w "/workspace/$REPLY_PROJ" \
+        "$match" /usr/local/sbin/aibox-enter-shell
 fi
 
 # ---- 子命令:start —— 启动 container 服务 ----
@@ -343,7 +783,7 @@ if [[ "${1:-}" == "start" ]]; then
     exit $?
 fi
 
-# ---- 子命令:build —— 构建/重建镜像(tag 与上下文目录写死,--no-cache 等参数透传)----
+# ---- 子命令:build —— 构建/重建一次性容器镜像(tag 与上下文目录写死,其余参数透传)----
 if [[ "${1:-}" == "build" ]]; then
     shift
     if [[ $# -gt 0 ]]; then
@@ -363,7 +803,7 @@ if [[ "${1:-}" == "stop" ]]; then
         exit 2
     fi
     if [[ "$target" == "--all" || "$target" == "-a" ]]; then
-        running="$(container ls -q 2>/dev/null | grep '^ai-' | sort || true)"
+        running="$(aibox_names)"
         if [[ -z "$running" ]]; then echo "没有正在运行的 aibox 容器。"; exit 0; fi
         echo "将停止以下所有 aibox 容器:"
         echo "$running" | sed 's/^/    /'
@@ -399,9 +839,9 @@ if [[ "${1:-}" == "logs" ]]; then
 fi
 
 # ---- 子命令:clear(别名 prune)—— 清理已停止的 aibox 容器 ----
-# 正常 --rm 容器不留残骸;崩溃/异常退出偶尔会留下已停止的,用这个清。只动 ai-* 容器。
+# 正常 --rm 容器不留残骸;崩溃/异常退出偶尔会留下已停止的,用这个清。只动 aibox-* 容器。
 if [[ "${1:-}" == "clear" || "${1:-}" == "prune" ]]; then
-    running="$(container ls -q 2>/dev/null | grep '^ai-' | sort || true)"
+    running="$(aibox_names)"
     all="$(aibox_names_all)"
     stopped=()
     while IFS= read -r n; do
@@ -434,7 +874,7 @@ if [[ "${1:-}" == "version" ]]; then
     exit 0
 fi
 
-# ---- 子命令:status —— 一屏自检:服务 / 镜像 / 目标版本 / 运行中的容器 ----
+# ---- 子命令:status —— 一屏自检:服务 / 镜像 / 开发机 / 运行中的容器 ----
 if [[ "${1:-}" == "status" ]]; then
     echo "== ai-sandbox 状态 =="
     # 服务:能否列容器 = 服务是否在跑(服务没起 container ls 会失败)
@@ -445,7 +885,8 @@ if [[ "${1:-}" == "status" ]]; then
     fi
     # 镜像:多探针兜底(inspect / images),都不中就报未知,不误判
     if container image inspect "$IMAGE" >/dev/null 2>&1 \
-       || container images 2>/dev/null | grep -q 'ai-sandbox'; then
+       || container images 2>/dev/null \
+            | grep -qE '(^|[[:space:]])ai-sandbox(:latest)?([[:space:]]|$)'; then
         echo "  镜像       : 已构建($IMAGE)"
     else
         echo "  镜像       : 未构建或查不到(试 aibox build)"
@@ -454,6 +895,24 @@ if [[ "${1:-}" == "status" ]]; then
     cv="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null)"
     xv="$(sed -n 's/^ARG CODEX_VERSION=//p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null)"
     echo "  目标版本   : claude ${cv:-?} / codex ${xv:-?}"
+    if container image inspect "$DEV_IMAGE" >/dev/null 2>&1 \
+       || container images 2>/dev/null \
+            | grep -qE '(^|[[:space:]])ai-sandbox-dev(:latest)?([[:space:]]|$)'; then
+        echo "  开发机镜像 : 已构建($DEV_IMAGE)"
+    else
+        echo "  开发机镜像 : 未构建或查不到(试 aibox dev build)"
+    fi
+    echo "  剪贴板贴图 : $(aibox_clip_status_line)"
+    if [[ "$svc_up" -eq 1 ]]; then
+        aibox_dev_probe
+        case "$AIBOX_DEV_STATE" in
+            exists)  echo "  持久开发机 : 已创建($DEV_MACHINE_NAME;aibox dev status 看详情)" ;;
+            missing) echo "  持久开发机 : 未创建" ;;
+            error)   echo "  持久开发机 : 无法查询(${AIBOX_DEV_ERROR:-未知错误})" ;;
+        esac
+    else
+        echo "  持久开发机 : 无法查询(服务未启动)"
+    fi
     # 运行中的容器
     if [[ "$svc_up" -eq 1 ]]; then
         aibox_load
@@ -474,22 +933,25 @@ MEMORY="8192M"
 
 # ---- 可选子命令:cc / claude -> 启动 claude;codex -> 启动 codex;不带则只进 shell ----
 LAUNCH=""
-case "${1:-}" in
-    cc|claude) LAUNCH="claude"; shift ;;
-    codex)     LAUNCH="codex";  shift ;;
-esac
-
-HOST_DIR="${1:-$PWD}"
-HOST_DIR="$(cd "$HOST_DIR" && pwd)"
+if [[ -n "$AIBOX_DEV_ACTION" ]]; then
+    HOST_DIR="$HOME"
+else
+    case "${1:-}" in
+        cc|claude) LAUNCH="claude"; shift ;;
+        codex)     LAUNCH="codex";  shift ;;
+    esac
+    HOST_DIR="${1:-$PWD}"
+    HOST_DIR="$(cd "$HOST_DIR" && pwd)"
+fi
 
 # 项目名 = 挂载目录的最后一段,清洗成合法的容器名字符(去掉首尾多余的 -)
 PROJECT_NAME="$(basename "$HOST_DIR" | tr -c 'a-zA-Z0-9_.-' '-' | sed 's/^-*//; s/-*$//')"
 [[ -z "$PROJECT_NAME" ]] && PROJECT_NAME="project"
 
-# 容器名 = ai-<项目名>-<时间戳后缀>。
-# 时间戳后缀可降低同一项目多窗口的重名概率,但同一秒启动仍可能冲突。
+# 容器名 = aibox-<项目名>-<时间戳后缀>-<启动器进程号>。
+# 专用前缀限定管理范围;进程号避免同一项目在同一秒启动时重名。
 # 该命名方式不依赖 container list 的输出格式(不同版本字段不一,不好解析)。
-CONTAINER_NAME="ai-${PROJECT_NAME}-$(date +%H%M%S)"
+CONTAINER_NAME="${CONTAINER_PREFIX}${PROJECT_NAME}-$(date +%H%M%S)-$$"
 
 # 真实目录 / 挂载目录 / 容器名称 不在这里打印 —— 一起并进容器内 entrypoint 的启动参数横幅
 # (通过 -e 传进去),省得主机侧和横幅两处分散。
@@ -578,6 +1040,156 @@ fi
 # 代理/时区/语言的「值 + 来源」不在这里打印 —— 统一由容器内 entrypoint 的启动横幅显示
 # (避免宿主机侧和容器侧重复两遍)。来源标签通过 -e 传进去,横幅里带上。
 
+# 持久开发机复用同一份 aibox.conf,但配置作用于本次 machine run 的登录会话。
+# 自定义变量和代理凭据通过 0600 临时 env-file 传入,不出现在 container argv。
+# machine 用户有免密 sudo,所以代理是默认路由而非一次性容器中的 fail-closed 边界。
+if [[ -n "$AIBOX_DEV_ACTION" ]]; then
+    case "$AIBOX_DEV_ACTION" in
+        restart|exec|update|version)
+            aibox_dev_require_exists || exit 1
+            ;;
+    esac
+
+    if [[ "$AIBOX_DEV_ACTION" == "restart" ]]; then
+        echo "==> 重启持久开发机: $DEV_MACHINE_NAME"
+        container machine stop "$DEV_MACHINE_NAME"
+    fi
+
+    aibox_dev_probe
+    if [[ "$AIBOX_DEV_STATE" == "error" ]]; then
+        echo "错误: 无法查询持久开发机。" >&2
+        [[ -n "$AIBOX_DEV_ERROR" ]] && echo "      $AIBOX_DEV_ERROR" >&2
+        exit 1
+    fi
+    if [[ "$AIBOX_DEV_STATE" == "missing" ]]; then
+        if ! container image inspect "$DEV_IMAGE" >/dev/null 2>&1; then
+            echo "错误: 找不到持久开发机镜像 ${DEV_IMAGE}。" >&2
+            echo "      请先运行 aibox dev build 构建开发机镜像。" >&2
+            exit 1
+        fi
+        echo "==> 首次创建持久开发机: $DEV_MACHINE_NAME"
+        echo "    宿主 Home 将读写挂载;机内安装的软件和系统配置保存在持久系统盘。"
+        container machine create \
+            --name "$DEV_MACHINE_NAME" \
+            --memory "$DEV_MEMORY" \
+            --home-mount rw \
+            "$DEV_IMAGE"
+    fi
+
+    aibox_dev_wait_systemd || exit 1
+
+    for dev_env_value in "$AIBOX_PROXY" "$AIBOX_TZ" "$AIBOX_LANG"; do
+        if [[ "$dev_env_value" == *$'\r'* || "$dev_env_value" == *$'\n'* ]]; then
+            echo "错误: dev 环境配置不能包含换行符。" >&2
+            exit 1
+        fi
+    done
+    unset dev_env_value
+
+    AIBOX_DEV_ENV_FILE="$(mktemp "${TMPDIR:-/tmp}/aibox-dev-env.XXXXXX")" || {
+        echo "错误: 无法创建 dev 环境配置临时文件。" >&2
+        exit 1
+    }
+    AIBOX_DEV_SYSTEM_FILE="$(mktemp "${TMPDIR:-/tmp}/aibox-dev-system.XXXXXX")" || {
+        rm -f -- "$AIBOX_DEV_ENV_FILE"
+        echo "错误: 无法创建 dev 系统配置临时文件。" >&2
+        exit 1
+    }
+    aibox_cleanup_dev_env() {
+        rm -f -- "$AIBOX_DEV_ENV_FILE" "$AIBOX_DEV_SYSTEM_FILE"
+    }
+    trap aibox_cleanup_dev_env EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    chmod 600 "$AIBOX_DEV_ENV_FILE" "$AIBOX_DEV_SYSTEM_FILE"
+    {
+        printf 'AIBOX_PROXY=%s\n' "$AIBOX_PROXY"
+        printf 'AIBOX_TZ=%s\n' "$AIBOX_TZ"
+    } > "$AIBOX_DEV_SYSTEM_FILE"
+    AIBOX_DEV_CUSTOM_NAMES=""
+    AIBOX_ENV_INDEX=0
+    while (( AIBOX_ENV_INDEX < ${#AIBOX_CUSTOM_ENV_NAMES[@]} )); do
+        if [[ -n "$AIBOX_DEV_CUSTOM_NAMES" ]]; then
+            AIBOX_DEV_CUSTOM_NAMES="$AIBOX_DEV_CUSTOM_NAMES,${AIBOX_CUSTOM_ENV_NAMES[$AIBOX_ENV_INDEX]}"
+        else
+            AIBOX_DEV_CUSTOM_NAMES="${AIBOX_CUSTOM_ENV_NAMES[$AIBOX_ENV_INDEX]}"
+        fi
+        AIBOX_ENV_INDEX=$((AIBOX_ENV_INDEX + 1))
+    done
+    {
+        printf 'AIBOX_PROXY=%s\n' "$AIBOX_PROXY"
+        printf 'AIBOX_TZ=%s\n' "$AIBOX_TZ"
+        printf 'AIBOX_LANG=%s\n' "$AIBOX_LANG"
+        printf 'AIBOX_DEV_CUSTOM_NAMES=%s\n' "$AIBOX_DEV_CUSTOM_NAMES"
+        # 剪贴板图片桥接:开发机用 --home-mount rw 挂了宿主 Home,路径与 macOS 侧完全
+        # 一致,原样传进去即可。没装宿主机侧就不传,垫片自会报告「没有图」。
+        if [[ -d "$HOME/.clipboard-bridge" ]]; then
+            printf 'CLIP_BRIDGE_DIR=%s\n' "$HOME/.clipboard-bridge"
+        fi
+        AIBOX_ENV_INDEX=0
+        while (( AIBOX_ENV_INDEX < ${#AIBOX_CUSTOM_ENV_NAMES[@]} )); do
+            printf '%s=%s\n' \
+                "${AIBOX_CUSTOM_ENV_NAMES[$AIBOX_ENV_INDEX]}" \
+                "${AIBOX_CUSTOM_ENV_VALUES[$AIBOX_ENV_INDEX]}"
+            AIBOX_ENV_INDEX=$((AIBOX_ENV_INDEX + 1))
+        done
+    } > "$AIBOX_DEV_ENV_FILE"
+    unset AIBOX_DEV_CUSTOM_NAMES AIBOX_ENV_INDEX
+
+    if ! container machine run --name "$DEV_MACHINE_NAME" --root \
+        --env-file "$AIBOX_DEV_SYSTEM_FILE" /usr/local/sbin/aibox-dev-configure; then
+        echo "错误: 持久开发机系统配置失败。" >&2
+        exit 1
+    fi
+
+    case "$AIBOX_DEV_ACTION" in
+        start|restart)
+            echo "==> 持久开发机已启动并刷新代理服务: $DEV_MACHINE_NAME"
+            dev_status=0
+            ;;
+        update)
+            echo "==> 升级持久开发机内的 AI CLI: $AIBOX_DEV_TARGET"
+            if container machine run --name "$DEV_MACHINE_NAME" --root \
+                /usr/local/sbin/aibox-dev-tools update "$AIBOX_DEV_TARGET"; then
+                dev_status=0
+            else
+                dev_status=$?
+            fi
+            ;;
+        version)
+            if container machine run --name "$DEV_MACHINE_NAME" \
+                /usr/local/sbin/aibox-dev-tools version "$AIBOX_DEV_TARGET"; then
+                dev_status=0
+            else
+                dev_status=$?
+            fi
+            ;;
+        exec)
+            echo "==> 在持久开发机内执行命令"
+            if container machine run --interactive --tty --name "$DEV_MACHINE_NAME" \
+                --env-file "$AIBOX_DEV_ENV_FILE" /usr/local/bin/aibox-dev-shell \
+                "${AIBOX_DEV_COMMAND[@]}"; then
+                dev_status=0
+            else
+                dev_status=$?
+            fi
+            ;;
+        shell)
+            echo "==> 进入持久开发机: $DEV_MACHINE_NAME(exit 仅退出当前 shell)"
+            if container machine run --interactive --tty --name "$DEV_MACHINE_NAME" \
+                --env-file "$AIBOX_DEV_ENV_FILE" /usr/local/bin/aibox-dev-shell; then
+                dev_status=0
+            else
+                dev_status=$?
+            fi
+            ;;
+    esac
+    aibox_cleanup_dev_env
+    trap - EXIT HUP INT TERM
+    exit "$dev_status"
+fi
+
 # 容器内运行用户是 node,HOME=/home/node,凭据要挂到它的 home 下。
 CONTAINER_HOME="/home/node"
 
@@ -621,6 +1233,27 @@ MOUNTS=(
     -v "$M2_REPO:$CONTAINER_HOME/.m2/repository"
     -v "$GRADLE_CACHE:$CONTAINER_HOME/.gradle"
 )
+
+# ---- 剪贴板图片桥接(可选,由 aibox clip install 开启)----
+# 镜像里的 xclip 垫片要读宿主机侧常驻监听写出的 PNG。持久开发机用 --home-mount rw
+# 挂了整个宿主 Home,同路径直接可见;一次性容器只挂项目目录,所以这里单独补一个只读挂载。
+# 目录不存在(= 没装宿主机侧)就什么都不做,垫片会安静地报告「剪贴板里没有图」。
+CLIP_BRIDGE_HOST="$HOME/.clipboard-bridge"
+CLIP_BRIDGE_GUEST=""
+if [[ -d "$CLIP_BRIDGE_HOST" ]]; then
+    case "$CLIP_BRIDGE_HOST/" in
+        "$HOST_DIR"/*)
+            # 项目目录本身已经包含了桥接目录(例如 aibox ~)。再挂一次等于同一宿主机路径
+            # 被共享两次,会触发 apple/container 的静默空挂载问题(见 README 已知问题),
+            # 因此直接复用项目挂载里的那一份。
+            CLIP_BRIDGE_GUEST="/workspace/$PROJECT_NAME${CLIP_BRIDGE_HOST#"$HOST_DIR"}"
+            ;;
+        *)
+            CLIP_BRIDGE_GUEST="/run/aibox/clipboard-bridge"
+            MOUNTS+=( -v "$CLIP_BRIDGE_HOST:$CLIP_BRIDGE_GUEST:ro" )
+            ;;
+    esac
+fi
 
 # ---- 运行期临时目录(entrypoint 快照 / 自定义环境变量 env-file 共用)----
 # mktemp -d 原子创建、权限 0700;首次使用时注册 EXIT 与常见终止信号的统一清理。
@@ -670,8 +1303,8 @@ else
     CMD=(bash)
 fi
 
-# 自定义变量通过临时 env-file 传入。放在 0700 的运行期临时目录内并收紧到 0600;
-# 清理随 aibox_tmp_dir 注册的统一 trap。空列表不创建文件,也不添加 --env-file 参数。
+# 自定义变量写入临时 env-file,再只读挂载给入口脚本。入口脚本降权到 node 后才导出,
+# 避免 PATH/LD_PRELOAD/BASH_ENV 等变量影响 root 初始化阶段。空列表不创建或挂载文件。
 AIBOX_ENV_FILE=""
 if (( ${#AIBOX_CUSTOM_ENV_NAMES[@]} > 0 )); then
     aibox_tmp_dir
@@ -695,6 +1328,7 @@ if (( ${#AIBOX_CUSTOM_ENV_NAMES[@]} > 0 )); then
         AIBOX_ENV_INDEX=$((AIBOX_ENV_INDEX + 1))
     done
     unset AIBOX_ENV_INDEX
+    MOUNTS+=( -v "$AIBOX_ENV_FILE:/run/aibox/user-env:ro" )
 fi
 
 # 使用单个非空参数数组规避 macOS Bash 3.2 + set -u 的空数组展开问题。
@@ -703,6 +1337,8 @@ AIBOX_RUN_ARGS=(
     --rm -it
     --memory "$MEMORY"
     --name "$CONTAINER_NAME"
+    --label "$CONTAINER_OWNER_LABEL"
+    --label "com.simpletang.ai-sandbox.project=$PROJECT_NAME"
     "${MOUNTS[@]}"
     -w "/workspace/$PROJECT_NAME"
     -e AIBOX_PROXY
@@ -712,8 +1348,12 @@ AIBOX_RUN_ARGS=(
     -e "AIBOX_LANG=$AIBOX_LANG"
     -e "AIBOX_LANG_SRC=$lang_src"
 )
-if [[ -n "$AIBOX_ENV_FILE" ]]; then
-    AIBOX_RUN_ARGS+=( --env-file "$AIBOX_ENV_FILE" )
+if [[ -n "$AIBOX_PROXY" ]]; then
+    # entrypoint 只在初始化防火墙时使用;随后会清空 capability bounding set 并撤销 sudo。
+    AIBOX_RUN_ARGS+=( --cap-add CAP_NET_ADMIN )
+fi
+if [[ -n "$CLIP_BRIDGE_GUEST" ]]; then
+    AIBOX_RUN_ARGS+=( -e "CLIP_BRIDGE_DIR=$CLIP_BRIDGE_GUEST" )
 fi
 AIBOX_RUN_ARGS+=(
     -e "AIBOX_PROJECT=$PROJECT_NAME"

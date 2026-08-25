@@ -2,10 +2,10 @@
 
 [中文](README.md) | English
 
-Run Claude Code and Codex CLI in short-lived Linux containers on macOS using
-[Apple container](https://github.com/apple/container). The `aibox` command mounts one project,
-keeps tool credentials and build caches between sessions, and optionally configures a proxy,
-timezone, locale, JDK 8, and Maven.
+Run Claude Code and Codex CLI on macOS using [Apple container](https://github.com/apple/container).
+The default `aibox` workflow creates a short-lived Linux container for one explicitly mounted
+project. `aibox dev` provides a separate persistent Linux development machine with the host home
+mounted read-write.
 
 This is an independent, unofficial project. It is not affiliated with, endorsed by, or supported
 by Apple, Anthropic, OpenAI, Eclipse Adoptium, the Apache Software Foundation, or the go-gost
@@ -15,17 +15,21 @@ complying with each service's terms and with applicable law.
 ## Features
 
 - One command to open a shell, Claude Code, or Codex CLI in an ephemeral container.
+- A persistent `container machine` development environment for working across projects and keeping
+  installed system packages between restarts.
 - The selected project is mounted at `/workspace/<project-name>`; unrelated host directories are
   not mounted automatically.
 - Separate persistent Claude and Codex state, without reusing the host's own CLI profiles.
 - Multiple projects and containers can run at the same time, with list, enter, log, stop, and
   cleanup commands.
-- Optional HTTP, HTTPS, SOCKS5, or SOCKS5H upstream proxy through a local `gost` bridge.
+- Optional HTTP, HTTPS, SOCKS5, or SOCKS5H upstream proxy with an IPv4/IPv6 egress firewall that blocks bypass traffic.
 - Runtime timezone and locale selection.
 - `ai-ipcheck` is installed by default, providing the `ipcheck` network-diagnostics command.
 - Optional JDK 8 and Maven from local archives; an empty `third_party/` directory still builds the
   core AI CLI image.
 - Pinned Claude Code and Codex CLI versions with an interactive update command.
+- `aibox clip install` enables a clipboard image bridge so Claude Code inside the sandbox can
+  paste images from the macOS clipboard with Ctrl+V.
 
 ## Compatibility
 
@@ -35,8 +39,8 @@ complying with each service's terms and with applicable law.
   CLI 1.0.0 is the currently tested version. This project does not use Docker Desktop or the
   `docker` command.
 - Bash 3.2 or later for `ai-box`; zsh and Bash completion are supported.
-- Enough memory and disk for the image, caches, and projects. Each aibox container currently
-  requests `8192M`; Apple container allocates VM memory on demand.
+- Enough memory and disk for the images, machine disk, caches, and projects. Ephemeral containers
+  and the development machine request `8192M` by default through `MEMORY` and `DEV_MEMORY`.
 
 The image is Linux/arm64. Any optional binary or archive placed in `third_party/` must match that
 platform.
@@ -116,7 +120,7 @@ source /absolute/path/to/ai-sandbox/ai-box-completion.sh
 ## Quick Start
 
 ```bash
-# Start Apple container and build the image.
+# Start Apple container and build the ephemeral image.
 aibox start
 aibox build
 
@@ -125,6 +129,10 @@ cd /path/to/project
 aibox            # shell
 aibox cc         # Claude Code; "claude" is also accepted
 aibox codex      # Codex CLI
+
+# Or enter the persistent, project-independent development machine.
+aibox dev build  # required before the first development-machine launch
+aibox dev
 ```
 
 When a tool exits, the launcher leaves you in the container shell. Run `exit` to remove that
@@ -196,14 +204,17 @@ single-quoted text is literal, while variables, command substitutions, and other
 double quotes are evaluated when the file is sourced. Single quotes are usually the safer choice
 for secrets.
 
-Custom values are not placed in the `container` CLI argument list, but this is not secret isolation:
-they are written briefly to a host-side temporary env file with mode `0600`, removed on normal exit
-and common termination signals, and remain visible to processes in the container. A system crash or
-forced `SIGKILL` can leave the temporary file behind. They are not exported into the host
-`ai-box` process environment, so custom names such as `PATH` and `HOME` do not alter the host
-launcher environment. `ai-box` no longer implicitly forwards `ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, or other API keys from the host environment. Every variable you need must be
-listed explicitly in `AIBOX_ENV_VARS`.
+Custom values are not placed in the `container` CLI argument list, but this is not secret isolation.
+They are written briefly to a host-side temporary env file with mode `0600`. Ephemeral mode mounts
+it read-only and imports it only after dropping to `node`; dev mode passes it only to the ordinary
+user login process through `machine run --env-file`. The root system-configuration step uses a
+separate file containing only the resolved `AIBOX_PROXY` and `AIBOX_TZ` values to refresh the proxy
+service and system timezone, so custom `PATH`, `LD_PRELOAD`, or `BASH_ENV` never reach it. Files are
+removed on normal exit and common termination signals, although a system
+crash or forced `SIGKILL` can leave one behind. Values remain visible to user processes. They are not
+exported into the host `ai-box` process environment, so custom names such as `PATH` and `HOME` do not
+alter the host launcher environment. `ai-box` no longer implicitly forwards `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, or other host API keys; list every required variable explicitly.
 
 ## Optional `third_party/` Components
 
@@ -244,22 +255,28 @@ With `AIBOX_PROXY` set and `gost` installed, the path is:
 ```text
 proxy-aware process
   -> HTTP_PROXY=http://127.0.0.1:8080
-  -> gost
+  -> gost (dedicated aibox-gost UID)
   -> configured HTTP(S)/SOCKS5(H) upstream
   -> destination
 ```
 
-Use `socks5h://` when the upstream proxy should resolve destination hostnames. Proxy credentials
-are masked in the startup banner, but remain available to processes inside the container through
-configuration and environment, so do not treat masking as secret isolation.
+The entrypoint installs an IPv4 and IPv6 `OUTPUT` firewall in proxy mode. Ordinary processes may
+only connect over loopback; only the dedicated `aibox-gost` UID may open external connections.
+Software that ignores the proxy variables, uses raw sockets, or performs custom DNS cannot bypass
+the proxy and instead fails to connect. This is a fail-closed kill switch, not transparent proxying,
+so software without HTTP-proxy support still needs explicit local-proxy configuration.
 
-The proxy is **not a network kill switch**. It applies to programs that honor the exported proxy
-variables or generated Maven/Gradle settings. Raw sockets, custom DNS, Java applications without
-proxy properties, and software that ignores those settings can connect directly. The entrypoint
-also attempts to disable IPv6 and prefers IPv4, but the kernel may reject that change. Use external
-network controls if traffic enforcement is a requirement.
+If the firewall or gost fails to initialize, the user command is not started. The launcher grants
+`CAP_NET_ADMIN` only for initialization; the entrypoint then removes the `node` sudo rule, clears
+the capability bounding set, enables `no_new_privs`, and launches the CLI as `node`. Use `socks5h://`
+when the upstream should resolve destination hostnames. Credentials are masked in the banner but
+remain available inside the container, so masking is not secret isolation.
 
 No host proxy application is required by this project. Direct mode is supported.
+
+The firewall described above applies only to ephemeral containers. Dev mode refreshes a systemd
+gost service inside the machine from the same upstream setting. Login shells and background tasks
+use its stable `127.0.0.1:8080` endpoint, but deliberate direct connections are not blocked.
 
 The image installs the third-party `ai-ipcheck` package from PyPI by default. Run it inside the
 container with:
@@ -293,6 +310,11 @@ and `creds/codex/` in the repository clone, not in the host's `~/.claude` or `~/
 those directories and any secret-bearing `aibox.conf` as credentials, do not publish them, and
 remove or back them up deliberately before deleting the clone.
 
+This authentication model applies to the default ephemeral containers. `aibox dev` mounts the host
+home read-write and therefore uses CLI configuration and login state from that home. The launcher
+refreshes the machine's system timezone and local proxy service from `aibox.conf`, and injects
+timezone, locale, and `AIBOX_ENV_VARS` settings into each dev login session.
+
 ## Security and Trust Boundary
 
 Containers are ephemeral, but they are not a boundary for untrusted code. A process in the
@@ -306,18 +328,32 @@ container can access every path explicitly mounted by `ai-box`:
 | `<repo>/cache/gradle` | `/home/node/.gradle` | Linux-specific Gradle cache |
 | Launch-time snapshot of `<repo>/entrypoint.sh` | `/usr/local/bin/entrypoint.sh` | Read-only runtime entrypoint override |
 
-The container user also has passwordless `sudo` inside its disposable container. Container code can
+User commands run as `node`. Direct-mode containers retain passwordless `sudo`; proxy-mode containers
+remove sudo and capabilities after firewall initialization so container code cannot disable the
+kill switch. Container code can
 modify the mounted project and persistent state, read values configured through `AIBOX_ENV_VARS`,
 access the network, and potentially alter mounted caches. Those values are not placed in the
 `container` CLI arguments or exported into the host launcher environment. They are written briefly
-to a mode-`0600` host-side temporary env file, removed when `ai-box` exits, and visible as
-environment variables to container processes. Review project scripts and AI-generated commands
+to a mode-`0600` host-side temporary env file, mounted read-only, imported only after privilege
+drop, removed when `ai-box` exits, and visible as environment variables to user processes. Review
+project scripts and AI-generated commands
 before running them. Container isolation reduces accidental host access; it does not make arbitrary
 code trusted.
 
 Claude groups project state by the container working-directory path. Two host directories with the
 same basename map to the same `/workspace/<name>` and may share Claude project history or memory in
 the persistent credential directory.
+
+`aibox dev` has a different trust boundary. On first boot, Apple container provisions a user with
+the host UID/GID and passwordless sudo, then mounts the entire host home read-write. The Linux root
+filesystem persists across stops, but projects, credentials, SSH configuration, and other files in
+the mounted home are real host data and can be modified by machine processes. The development
+machine reads the same `aibox.conf`. A configured proxy refreshes a machine-local gost service
+managed by systemd, and login sessions use its stable local HTTP endpoint; custom variables are
+injected through a temporary mode-`0600` env file. Because the machine user has sudo and full
+system control, this is a default proxy route, not the ephemeral container's fail-closed egress
+boundary, and a process can deliberately bypass it. Use `dev` for trusted development workflows,
+not for code that must be restricted to one host directory or forced through the proxy.
 
 ## Commands
 
@@ -326,6 +362,20 @@ the persistent credential directory.
 aibox [/path/to/project]
 aibox cc [/path/to/project]
 aibox codex [/path/to/project]
+
+# Persistent development machine (fixed name: aibox-dev)
+aibox dev                     # create/start and enter; exit only closes this shell
+aibox dev build [--no-cache]  # build only the development-machine image
+aibox dev start               # create/start and refresh the proxy without a shell
+aibox dev restart             # restart and refresh the proxy service
+aibox dev exec <cmd> [args]   # run a command as the ordinary machine user
+aibox dev update [cc|codex]   # update AI CLIs on the persistent system disk
+aibox dev version [cc|codex]  # show versions actually installed in the machine
+aibox dev set memory=8G cpus=4  # change resources; takes effect after restart
+aibox dev status
+aibox dev stop                # keep the persistent system disk
+aibox dev logs [-f]
+aibox dev delete              # confirm, then delete the machine and system disk; alias: rm
 
 # Manage aibox containers
 aibox list                      # alias: ls; add -a for stopped containers
@@ -337,15 +387,66 @@ aibox clear                     # alias: prune
 
 # Service, image, and CLI versions
 aibox start
-aibox build [--no-cache]
+aibox build [--no-cache]      # build only the ephemeral-container image
 aibox update [cc|codex]
 aibox version
 aibox status
 aibox help
+
+# Clipboard image bridge (host-side watcher; applies to both modes)
+aibox clip install
+aibox clip status
+aibox clip restart
+aibox clip uninstall
 ```
 
-Every normal launch creates a separate `ai-<project>-<time>` container. `aibox enter` opens another
+Every normal launch creates a separate `aibox-<project>-<time>-<launcher-pid>` container carrying a
+`com.simpletang.ai-sandbox.managed=true` label. Management commands only recognize `aibox-*`, so
+unrelated `ai-*` containers are never included in bulk stop or cleanup. Use the native `container`
+commands to handle legacy `ai-*` containers left by an older release. `aibox enter` opens another
 shell in an existing container; exiting that extra shell does not stop the original container.
+
+The development machine lives in the separate `container machine` namespace and always uses the
+name `aibox-dev`. Ordinary `aibox list`, `stop`, and `clear` commands never manage it. Running
+`aibox dev` automatically boots a stopped machine. `aibox dev start` boots it and refreshes the
+machine's system timezone and local proxy without opening a shell, while `restart` reboots it and
+performs the same refresh. Locale and custom variables are session settings applied by bare
+`aibox dev` and `dev exec`; timezone also updates `/etc/localtime` and `/etc/timezone`. `dev exec`
+allocates an interactive TTY. Only `aibox dev delete` removes the persistent system disk.
+
+## Clipboard Image Pasting
+
+A terminal can only deliver **text** into the tty as simulated keystrokes; images never cross that
+boundary. Pasting an image requires the running program to read the operating-system clipboard
+itself, and the sandbox has neither X11/Wayland nor any route to the macOS pasteboard. Ctrl+V image
+paste therefore does not work out of the box.
+
+`aibox clip install` starts a launchd watcher on macOS. Whenever the clipboard holds an image, the
+watcher writes it as a PNG into `~/.clipboard-bridge/`. An `xclip` shim baked into the image reads
+that directory, so Ctrl+V behaves natively. No X server and no network ports are involved.
+
+```bash
+aibox clip install     # run once on macOS
+# copy an image, then
+aibox clip status      # should report an image is ready to paste
+```
+
+Both `aibox status` and `aibox dev status` include a clipboard-bridge line that distinguishes
+not installed, running with an image ready, running with an empty clipboard, and a stale heartbeat
+meaning the watcher died — so a broken bridge shows up in the ordinary status check.
+
+Inside the sandbox press **Ctrl+V**, not ⌘V — the macOS terminal intercepts ⌘V as a text paste, so
+it never reaches the container.
+
+The bridge path differs per mode and `ai-box` injects `CLIP_BRIDGE_DIR` accordingly. `aibox dev`
+already mounts the whole host home with `--home-mount rw`, so the path matches macOS exactly; the
+ephemeral `aibox` mounts only the project directory, so `~/.clipboard-bridge` is additionally
+mounted read-only at `/run/aibox/clipboard-bridge`. When the host side is not installed nothing is
+mounted and the shim quietly reports no image.
+
+The watcher mirrors **images only, never clipboard text**, so passwords copied from a password
+manager are never written to disk. See [`clipboard-bridge/README.md`](clipboard-bridge/README.md)
+for the mechanism, architecture diagram, and troubleshooting.
 
 ## Optional Java Support
 
@@ -362,8 +463,8 @@ Gradle home should not be shared between macOS and Linux. Avoid simultaneous hos
 Maven builds that write the same artifact cache.
 
 Maven and Gradle do not consistently honor `HTTP_PROXY`, so the entrypoint creates their proxy
-settings when a proxy is active. Java applications are not forced through the proxy. Add JVM proxy
-properties explicitly when needed, for example:
+settings when a proxy is active. Direct Java connections are rejected by the proxy-mode firewall;
+add JVM proxy properties explicitly when needed, for example:
 
 ```bash
 java -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8080 \
@@ -379,15 +480,30 @@ existing image, downloading only the packages that actually changed. This skips 
 layers entirely and does not depend on the builder's layer cache (which is lost whenever the builder
 container is deleted and recreated, turning a full rebuild into a re-download of every dependency).
 If the local image is missing or the incremental build fails, the command offers a full rebuild
-instead. Existing containers keep their old image; new containers use the updated one.
+instead. Existing containers keep their old image; new ephemeral containers use the updated one.
+
+The development machine has its own writable system disk and does not change when its base image is
+updated. `aibox dev update [cc|codex]` upgrades the AI CLIs directly on that disk, using the local
+dev gost service when configured, and does not change the Dockerfile pins. To rebuild from the
+latest image recipe, back up any system-disk data you need. Run `aibox build` first when the base
+image changed, then run `aibox dev build`. Delete the old machine with `aibox dev delete`, and run
+`aibox dev` to recreate it. Deleting the machine does not delete files in the mounted host home.
 
 Each incremental update adds a new layer while older CLI files remain in lower layers, so the image
 grows slowly over repeated updates. Run `aibox build` occasionally to squash it — `update` keeps the
 Dockerfile pins in sync, so a full rebuild reproduces the same versions.
 
-Rebuild after changing the Dockerfile, any `third_party/` asset, or pinned CLI versions. Changes to
-`aibox.conf` and `entrypoint.sh` apply to the next new container without rebuilding; changes to the
-symlinked `ai-box` launcher apply on the next invocation.
+Run `aibox build` after changing `Dockerfile`, `network-lockdown.sh`, `LOCALE_GEN`, a pinned CLI
+version, or a recognized `third_party/` asset. Run `aibox dev build` after changing `Dockerfile.dev`,
+a `dev-*.sh` helper, or a development-machine service. Run both in that order when the development
+image must inherit a newly rebuilt base image. An existing development machine does not receive new
+dev helpers until it is deleted and recreated. Changes to `aibox.conf` and the symlinked `ai-box`
+launcher apply on the next invocation. Ordinary `entrypoint.sh` edits are mounted as a launch-time
+snapshot, but changes involving image tools, users, or privileges still require a full rebuild.
+
+After upgrading to the firewall-enabled design, run `aibox build` at least once. An older image does
+not contain iptables, the dedicated gost user, or the root initialization entrypoint and cannot be
+upgraded by the runtime entrypoint snapshot alone.
 
 `aibox version` and the version line in `aibox status` read the pins declared in the current
 Dockerfile. They do not inspect an already-built image, so they can differ from that image until a
@@ -399,8 +515,11 @@ successful rebuild.
 | --- | --- |
 | `container` is unavailable | Confirm macOS 26, Apple silicon, and the Apple container installation. This project does not use Docker. |
 | The service or image is missing | Run `aibox status`, then `aibox start` and `aibox build`. |
+| `aibox dev` reports a missing machine image | Run `aibox dev build`; if its base image is missing, run `aibox build` first. |
+| The first `aibox dev` after a Mac restart reports `Failed to connect to bus` | Update the host-side `ai-box`; it waits for the machine's systemd manager before applying system settings, without requiring machine deletion. |
 | Build dependency downloads fail | The build still needs access to the base-image registry, Debian/PyPI, and npm sources. Fix that path or retry; local `third_party/` assets only replace their own downloads. |
 | A configured proxy fails immediately | Confirm that `third_party/gost` existed when the image was built, is Linux/arm64, and is executable; then rebuild. Check `aibox logs <target>`. |
+| Lockdown components are missing or firewall initialization fails | Run a full `aibox build`. If it still fails, confirm Apple container accepted the launcher's `CAP_NET_ADMIN` capability. |
 | A SOCKS proxy cannot resolve names | Try a `socks5h://` URL so the proxy resolves hostnames. |
 | A locale falls back to `C.UTF-8` | Add it to `LOCALE_GEN` in the Dockerfile and rebuild. |
 | A long CLI session becomes slow or is killed | Check host memory pressure; the container requests `8192M`. Compact or restart long Claude sessions when appropriate. |
@@ -430,11 +549,12 @@ through the contact method on their GitHub profile rather than opening a public 
 
 ## Uninstall
 
-1. Stop active aibox containers with `aibox stop --all`.
+1. Stop active aibox containers with `aibox stop --all`, then delete the persistent development
+   machine and its system disk with `aibox dev delete` if it exists.
 2. Remove the `aibox` symlink from `$HOME/.local/bin` and remove the completion line from your shell
    startup file.
-3. Delete the `ai-sandbox:latest` image with Apple container's image-management command if it is no
-   longer needed.
+3. Delete the `ai-sandbox:latest` and `ai-sandbox-dev:latest` images with Apple container's
+   image-management command if they are no longer needed.
 4. Delete the clone only after deciding whether to keep `creds/`, `cache/gradle`, and local
    `third_party/` assets. The clone may contain authentication secrets even though Git ignores them.
 

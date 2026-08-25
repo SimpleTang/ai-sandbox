@@ -16,7 +16,8 @@
 ARG BASE_IMAGE=ai-sandbox:latest
 FROM ${BASE_IMAGE}
 
-# 基础镜像末尾是 USER node;npm install -g 写 /usr/local 需要 root,装完再切回。
+# 主镜像以 root 进入 entrypoint,由 entrypoint 完成防火墙后降权到 node。
+# npm install -g 同样需要 root;本增量层结束时必须保持 USER root。
 USER root
 ARG NPM_SPECS
 RUN set -eux; \
@@ -24,4 +25,4 @@ RUN set -eux; \
     npm config set registry https://registry.npmmirror.com; \
     npm install -g ${NPM_SPECS}; \
     npm config delete registry
-USER node
+USER root
