@@ -5,12 +5,12 @@
 # 然后重开终端 / `source` 一下即可。
 #
 # 效果:
-#   aibox <TAB>          -> 补全子命令(cc/codex/list/enter/update ...)
-#   aibox dev <TAB>      -> 补全持久开发机管理命令
-#   aibox enter <TAB>    -> 补全「正在运行的容器名」和「项目名」
-#   aibox update <TAB>   -> 补全 cc / codex
+#   aibox <TAB>            -> 补全长期容器的子命令(setup/tmp/cc/codex/start/update ...)
+#   aibox tmp <TAB>        -> 补全临时容器的子命令(cc/codex/list/enter/stop ...)
+#   aibox tmp enter <TAB>  -> 补全「正在运行的临时容器名」和「项目名」
+#   aibox update <TAB>     -> 补全 cc / codex
 #
-# 说明:补全候选来自 `container ls -q`(只列运行中的),和 aibox enter 的匹配口径一致;
+# 说明:补全候选来自 `container ls -q`(只列运行中的),和 aibox tmp enter 的匹配口径一致;
 #       项目名由容器名 aibox-<项目>-<6位时间戳>-<进程号> 反推。enter 也支持纯数字编号,那个太短、
 #       无需补全,这里只补全名字。
 
@@ -28,39 +28,40 @@ _aibox_enter_candidates() {
 }
 
 # 主补全函数(bash 原生;zsh 经 bashcompinit 复用同一套)
+# 默认命令操作长期容器;aibox tmp ... 操作临时容器。
 _aibox_complete() {
     local cur prev
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     if [[ "$COMP_CWORD" -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "cc claude codex dev clip list ls enter stop logs clear prune start build update version status help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "setup tmp cc claude codex start restart exec update version set status stop logs delete rm build migrate clip help" -- "$cur") )
         return 0
     fi
-    if [[ "${COMP_WORDS[1]:-}" == "dev" ]]; then
+    if [[ "${COMP_WORDS[1]:-}" == "tmp" ]]; then
         if [[ "$COMP_CWORD" -eq 2 ]]; then
-            COMPREPLY=( $(compgen -W "build start restart exec update version set status stop delete rm logs help" -- "$cur") )
-        elif [[ "${COMP_WORDS[2]:-}" == "logs" ]]; then
-            COMPREPLY=( $(compgen -W "-f --follow --boot -n" -- "$cur") )
-        elif [[ "${COMP_WORDS[2]:-}" == "update" || "${COMP_WORDS[2]:-}" == "version" ]]; then
-            COMPREPLY=( $(compgen -W "cc codex" -- "$cur") )
-        elif [[ "${COMP_WORDS[2]:-}" == "set" ]]; then
-            COMPREPLY=( $(compgen -W "memory=8G cpus=4" -- "$cur") )
-        elif [[ "${COMP_WORDS[2]:-}" == "build" ]]; then
-            COMPREPLY=( $(compgen -W "--no-cache" -- "$cur") )
-        else
-            COMPREPLY=()
+            COMPREPLY=( $(compgen -W "cc claude codex list ls enter stop logs clear prune build update version help" -- "$cur") )
+            return 0
         fi
+        case "$prev" in
+            # 接容器目标的子命令:补全运行中的临时容器名 / 项目名
+            enter|logs)
+                    COMPREPLY=( $(compgen -W "$(_aibox_enter_candidates)" -- "$cur") ) ;;
+            stop)   COMPREPLY=( $(compgen -W "$(_aibox_enter_candidates) --all" -- "$cur") ) ;;
+            update) COMPREPLY=( $(compgen -W "cc codex" -- "$cur") ) ;;
+            list|ls) COMPREPLY=( $(compgen -W "-a" -- "$cur") ) ;;
+            build)  COMPREPLY=( $(compgen -W "--no-cache" -- "$cur") ) ;;
+            *)      COMPREPLY=() ;;
+        esac
         return 0
     fi
     case "$prev" in
-        # 接容器目标的子命令:补全运行中的容器名 / 项目名
-        enter|logs)
-                COMPREPLY=( $(compgen -W "$(_aibox_enter_candidates)" -- "$cur") ) ;;
-        stop)   COMPREPLY=( $(compgen -W "$(_aibox_enter_candidates) --all" -- "$cur") ) ;;
-        update) COMPREPLY=( $(compgen -W "cc codex" -- "$cur") ) ;;
+        update|version) COMPREPLY=( $(compgen -W "cc codex" -- "$cur") ) ;;
+        logs)   COMPREPLY=( $(compgen -W "-f --follow --boot -n" -- "$cur") ) ;;
+        set)    COMPREPLY=( $(compgen -W "memory=8G cpus=4" -- "$cur") ) ;;
         clip)   COMPREPLY=( $(compgen -W "install uninstall status restart doctor" -- "$cur") ) ;;
         build)  COMPREPLY=( $(compgen -W "--no-cache" -- "$cur") ) ;;
+        setup)  COMPREPLY=( $(compgen -W "--check" -- "$cur") ) ;;
         *)      COMPREPLY=() ;;
     esac
     return 0

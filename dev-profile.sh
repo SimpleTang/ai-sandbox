@@ -1,6 +1,14 @@
-# container machine mounts the host user's home at its matching machine path.
-# Keep Claude's state with that user instead of the base image's ephemeral node user.
-export CLAUDE_CONFIG_DIR="$HOME/.claude"
+# Claude and Codex state lives in the host's ~/.aibox, shared with the ephemeral
+# `aibox tmp` containers and kept apart from the Mac's own ~/.claude and ~/.codex.
+# The machine user's $HOME is /home/<user> on the system disk; the host home is
+# mounted at its original path, which the launcher records in /etc/aibox/state-dir.
+aibox_state_dir="$HOME/.aibox"
+if [ -r /etc/aibox/state-dir ]; then
+    aibox_state_dir="$(cat /etc/aibox/state-dir)"
+fi
+export CLAUDE_CONFIG_DIR="$aibox_state_dir/claude"
+export CODEX_HOME="$aibox_state_dir/codex"
+unset aibox_state_dir
 
 if [ -x /opt/java/jdk8/bin/java ]; then
     export JAVA_HOME=/opt/java/jdk8

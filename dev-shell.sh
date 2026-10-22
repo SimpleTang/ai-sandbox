@@ -48,7 +48,22 @@ if [[ -n "${AIBOX_PROXY:-}" ]]; then
     aibox_export_default NO_PROXY "localhost,127.0.0.1,::1"
     aibox_export_default no_proxy "localhost,127.0.0.1,::1"
 fi
-unset AIBOX_PROXY AIBOX_DEV_CUSTOM_NAMES
+# aibox cc / aibox codex: start the tool first, then stay in a login shell, like
+# the ephemeral containers do. Only the two known tools are accepted.
+aibox_launch="${AIBOX_DEV_LAUNCH:-}"
+case "$aibox_launch" in
+    ""|claude|codex) ;;
+    *)
+        echo "aibox: unsupported AIBOX_DEV_LAUNCH '$aibox_launch'" >&2
+        exit 2
+        ;;
+esac
+# aibox exec: the launcher passes the command shell-quoted in AIBOX_DEV_EXEC because
+# container machine run re-splits plain arguments on spaces.
+if [[ -n "${AIBOX_DEV_EXEC:-}" ]]; then
+    eval "set -- $AIBOX_DEV_EXEC"
+fi
+unset AIBOX_PROXY AIBOX_DEV_CUSTOM_NAMES AIBOX_DEV_LAUNCH AIBOX_DEV_EXEC
 unset -f aibox_custom_has aibox_export_default
 export PATH="$AIBOX_DEV_FINAL_PATH"
 unset AIBOX_DEV_FINAL_PATH
@@ -60,4 +75,11 @@ if [[ $# -gt 0 ]]; then
     exec "$@"
 fi
 
+if [[ -n "$aibox_launch" ]]; then
+    # Login shells load the machine profile; this process is not one, so load it here.
+    # shellcheck disable=SC1091
+    [[ ! -r /etc/profile.d/aibox-dev.sh ]] || source /etc/profile.d/aibox-dev.sh
+    "$aibox_launch" || true
+fi
+unset aibox_launch
 exec /bin/bash -l
