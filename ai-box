@@ -27,7 +27,7 @@
 #   ai-box tmp clear            # 清理已停止的临时容器(也可写作 prune)
 #   ai-box tmp build [--no-cache]  # 只构建临时容器所用的基础镜像
 #   ai-box tmp update [cc|codex]   # 检查 CLI 新版,确认后在现有镜像上增量更新
-#   ai-box tmp version          # 显示 Dockerfile 锁定的 CLI 版本
+#   ai-box tmp version          # 显示临时容器镜像的 CLI 构建版本
 #   —— 通用 ——
 #   ai-box status               # 一屏自检:服务 / 镜像 / 长期容器 / 临时容器
 #   ai-box clip ...             # 剪贴板贴图(两种容器都生效)
@@ -39,7 +39,7 @@
 # 登录凭据:两种容器共用宿主机的 ~/.aibox/claude 与 ~/.aibox/codex,
 #   独立于 Mac 本机 CLI 的 ~/.claude / ~/.codex,登录一次两边都能用。
 #
-# 代理/时区/语言/容器环境变量:在仓库的 aibox.conf 里配(aibox setup 或 cp aibox.conf.example aibox.conf),都可选。
+# 代理/时区/语言/容器环境变量:在 ~/.aibox/aibox.conf 里配(aibox setup 交互生成,或参照 aibox.conf.example),都可选。
 #   AIBOX_PROXY   代理 URL(http/socks5/... );留空=直连
 #   AIBOX_TZ      时区;留空=跟随宿主机
 #   AIBOX_LANG    语言;留空=跟随宿主机
@@ -49,7 +49,7 @@
 set -euo pipefail
 
 # aibox 自身的版本。发版时与 CHANGELOG.md 的条目和 git tag(v<版本>)保持一致。
-AIBOX_VERSION="0.1.0"
+AIBOX_VERSION="0.2.0"
 
 IMAGE="ai-sandbox:latest"
 DEV_IMAGE="ai-sandbox-dev:latest"
@@ -61,11 +61,22 @@ CONTAINER_OWNER_LABEL="com.simpletang.ai-sandbox.managed=true"
 # 改动这里前先在新版本上跑完冒烟测试和长期 / 临时容器的真机验证。setup.sh 里有同样一对常量。
 CONTAINER_MIN_VERSION="1.0.0"
 CONTAINER_TESTED_VERSION="1.6.0"
-# Claude / Codex 状态:两种容器共用,与 Mac 本机 CLI 的 ~/.claude、~/.codex 分开。
-# 放在 Home 下:长期容器按原路径挂载整个 Home,临时容器单独挂载这两个目录。
+# 用户数据与状态统一放在 ~/.aibox,程序所在目录(git 克隆或将来的 brew 安装目录)只读、可整体替换。
+# 放在 Home 下:长期容器按原路径挂载整个 Home,临时容器单独挂载需要的子目录。
+#   claude/ codex/      Claude / Codex 状态,两种容器共用,与 Mac 本机 CLI 的 ~/.claude、~/.codex 分开
+#   aibox.conf          运行期配置
+#   third_party/        可选的 gost / JDK / Maven,构建时放进构建上下文
+#   cache/gradle/       临时容器的 Gradle 缓存
+#   versions.env        aibox tmp update 升级过的 CLI 版本,构建时覆盖 Dockerfile 里的默认值
+#   machine/            同步进长期容器前暂存的辅助脚本
 AIBOX_STATE_DIR="$HOME/.aibox"
 CLAUDE_STATE="$AIBOX_STATE_DIR/claude"
 CODEX_STATE="$AIBOX_STATE_DIR/codex"
+AIBOX_CONF="$AIBOX_STATE_DIR/aibox.conf"
+AIBOX_THIRD_PARTY="$AIBOX_STATE_DIR/third_party"
+AIBOX_CACHE_DIR="$AIBOX_STATE_DIR/cache"
+AIBOX_VERSIONS_FILE="$AIBOX_STATE_DIR/versions.env"
+AIBOX_MACHINE_STAGE="$AIBOX_STATE_DIR/machine"
 
 # 沙箱仓库目录 = 此脚本真实文件所在目录。逐层解析软链接,因此从 PATH 中的
 # aibox 链接调用也能定位正确的 Dockerfile、配置、凭据和缓存目录。
@@ -81,6 +92,157 @@ while [[ -h "$SCRIPT_PATH" ]]; do
     fi
 done
 SANDBOX_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" >/dev/null 2>&1 && pwd)"
+
+# ---- 公共函数:版本比较、CLI 版本钉、构建上下文、旧布局搬迁 ----
+
+# aibox_version_lt A B:A 比 B 旧时返回 0(逐段比较数字,兼容 Bash 3.2)
+aibox_version_lt() {
+    local a="$1" b="$2" x y
+    while [[ -n "$a" || -n "$b" ]]; do
+        x="${a%%.*}"; y="${b%%.*}"
+        x="${x:-0}"; y="${y:-0}"
+        if (( 10#$x < 10#$y )); then return 0; fi
+        if (( 10#$x > 10#$y )); then return 1; fi
+        [[ "$a" == *.* ]] && a="${a#*.}" || a=""
+        [[ "$b" == *.* ]] && b="${b#*.}" || b=""
+    done
+    return 1
+}
+
+# CLI 版本:Dockerfile 里是随 aibox 发布的默认值;aibox tmp update 升级过的写在 versions.env。
+# 两者取较新的那个,这样升级 aibox 带来更新的默认值时也不会被旧的本地记录拖住。
+aibox_pin_default() { sed -n "s/^ARG $1=//p" "$SANDBOX_DIR/Dockerfile" 2>/dev/null | head -n 1; }
+aibox_pin_local() {
+    [[ -f "$AIBOX_VERSIONS_FILE" ]] || return 0
+    sed -n "s/^$1=//p" "$AIBOX_VERSIONS_FILE" | tail -n 1
+}
+aibox_pin() {
+    local def loc
+    def="$(aibox_pin_default "$1")"
+    loc="$(aibox_pin_local "$1")"
+    if [[ -n "$loc" ]] && { [[ -z "$def" ]] || aibox_version_lt "$def" "$loc"; }; then
+        printf '%s\n' "$loc"
+    else
+        printf '%s\n' "$def"
+    fi
+}
+# 写入(覆盖)versions.env 里的一项
+aibox_pin_set() {
+    local name="$1" value="$2" tmp
+    mkdir -p "$AIBOX_STATE_DIR"
+    tmp="$(mktemp "$AIBOX_VERSIONS_FILE.tmp.XXXXXX")"
+    { [[ ! -f "$AIBOX_VERSIONS_FILE" ]] || grep -v "^$name=" "$AIBOX_VERSIONS_FILE" || true
+      printf '%s=%s\n' "$name" "$value"; } > "$tmp"
+    mv -f -- "$tmp" "$AIBOX_VERSIONS_FILE"
+}
+# 全量构建基础镜像时传给 container build 的版本参数,写入数组 AIBOX_PIN_ARGS。
+# 调用时放在用户参数之前,用户自己传的同名 --build-arg 在后面,会覆盖这里的值。
+aibox_pin_args() {
+    local name value
+    AIBOX_PIN_ARGS=()
+    for name in CLAUDE_CODE_VERSION CODEX_VERSION; do
+        value="$(aibox_pin "$name")"
+        [[ -z "$value" ]] || AIBOX_PIN_ARGS+=(--build-arg "$name=$value")
+    done
+}
+
+# 在临时目录里组装构建上下文:程序文件按 .dockerignore 的白名单从程序目录取,third_party 从
+# ~/.aibox 取。程序目录因此可以只读(brew 安装),也不会把配置、凭据和缓存带进构建。
+aibox_stage_context() {
+    local ctx line path name
+    ctx="$(mktemp -d "${TMPDIR:-/tmp}/aibox-build.XXXXXX")" || return 1
+    cp "$SANDBOX_DIR/.dockerignore" "$ctx/.dockerignore" || { rm -rf -- "$ctx"; return 1; }
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+            '!'*) path="${line#!}"; path="${path%/}" ;;
+            *) continue ;;
+        esac
+        case "$path" in third_party|third_party/*) continue ;; esac
+        [[ -f "$SANDBOX_DIR/$path" ]] || continue
+        mkdir -p "$ctx/$(dirname "$path")"
+        cp -p "$SANDBOX_DIR/$path" "$ctx/$path" || { rm -rf -- "$ctx"; return 1; }
+    done < "$SANDBOX_DIR/.dockerignore"
+    mkdir -p "$ctx/third_party"
+    : > "$ctx/third_party/.gitkeep"
+    for name in gost jdk8.tar.gz maven.tar.gz; do
+        [[ -f "$AIBOX_THIRD_PARTY/$name" ]] || continue
+        # APFS 上 cp -c 是写时复制的克隆,大文件(JDK)不占时间和空间;不支持时退回普通复制
+        cp -c "$AIBOX_THIRD_PARTY/$name" "$ctx/third_party/$name" 2>/dev/null \
+            || cp -p "$AIBOX_THIRD_PARTY/$name" "$ctx/third_party/$name" \
+            || { rm -rf -- "$ctx"; return 1; }
+    done
+    printf '%s\n' "$ctx"
+}
+# aibox_build_in_context <container build 参数...>:在暂存的上下文里构建,结束后清理
+aibox_build_in_context() {
+    local ctx rc=0
+    ctx="$(aibox_stage_context)" || { echo "错误: 无法准备构建上下文。" >&2; return 1; }
+    ( cd "$ctx" && container build "$@" . ) || rc=$?
+    rm -rf -- "$ctx"
+    return "$rc"
+}
+
+# 旧版把配置、third_party、Gradle 缓存放在程序目录里,aibox tmp update 还会直接改 Dockerfile。
+# 每次运行时检查一遍,发现旧布局就搬到 ~/.aibox(幂等;已有的新位置绝不覆盖)。
+aibox_relocate_state() {
+    local moved="" name changed
+    mkdir -p "$AIBOX_STATE_DIR"
+    chmod 700 "$AIBOX_STATE_DIR" 2>/dev/null || true
+
+    # aibox.conf:搬走后在原处留一个软链接,照旧打开程序目录里的 aibox.conf 编辑也行
+    if [[ -f "$SANDBOX_DIR/aibox.conf" && ! -L "$SANDBOX_DIR/aibox.conf" ]]; then
+        if [[ ! -e "$AIBOX_CONF" ]]; then
+            mv -- "$SANDBOX_DIR/aibox.conf" "$AIBOX_CONF"
+            chmod 600 "$AIBOX_CONF" 2>/dev/null || true
+            ln -s "$AIBOX_CONF" "$SANDBOX_DIR/aibox.conf" 2>/dev/null || true
+            moved="${moved:+${moved}、}aibox.conf"
+        elif ! cmp -s "$SANDBOX_DIR/aibox.conf" "$AIBOX_CONF"; then
+            echo "提示: 程序目录里的 aibox.conf 已不再读取,生效的是 ${AIBOX_CONF}。确认无用后可删除前者。" >&2
+        fi
+    fi
+
+    for name in gost jdk8.tar.gz maven.tar.gz; do
+        [[ -f "$SANDBOX_DIR/third_party/$name" ]] || continue
+        if [[ ! -e "$AIBOX_THIRD_PARTY/$name" ]]; then
+            mkdir -p "$AIBOX_THIRD_PARTY"
+            mv -- "$SANDBOX_DIR/third_party/$name" "$AIBOX_THIRD_PARTY/$name"
+            moved="${moved:+${moved}、}third_party/$name"
+        else
+            echo "提示: 程序目录里的 third_party/$name 已不再使用,生效的是 ${AIBOX_THIRD_PARTY}/${name}。确认无用后可删除前者。" >&2
+        fi
+    done
+
+    # Gradle 缓存正被临时容器挂载时先不动,下次再搬;目标若只是个空目录(新版启动时建的)视同不存在
+    [[ ! -d "$SANDBOX_DIR/cache/gradle" ]] || rmdir "$AIBOX_CACHE_DIR/gradle" 2>/dev/null || true
+    if [[ -d "$SANDBOX_DIR/cache/gradle" && ! -e "$AIBOX_CACHE_DIR/gradle" ]] \
+       && ! container ls -q 2>/dev/null | grep -q "^${CONTAINER_PREFIX}"; then
+        mkdir -p "$AIBOX_CACHE_DIR"
+        mv -- "$SANDBOX_DIR/cache/gradle" "$AIBOX_CACHE_DIR/gradle"
+        rmdir "$SANDBOX_DIR/cache" 2>/dev/null || true
+        moved="${moved:+${moved}、}Gradle 缓存"
+    elif [[ -d "$SANDBOX_DIR/cache/gradle" && -e "$AIBOX_CACHE_DIR/gradle" ]]; then
+        echo "提示: 程序目录里的 cache/gradle 已不再使用,生效的是 ${AIBOX_CACHE_DIR}/gradle。确认无用后可删除前者。" >&2
+    fi
+
+    # 旧版 aibox tmp update 改过的 Dockerfile 版本号:只在本地改动仅限这两行时提取并还原,
+    # 否则保持原样(那是用户自己的修改)
+    if [[ ! -f "$AIBOX_VERSIONS_FILE" ]] \
+       && git -C "$SANDBOX_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+       && ! git -C "$SANDBOX_DIR" diff --quiet -- Dockerfile 2>/dev/null; then
+        changed="$(git -C "$SANDBOX_DIR" diff -U0 -- Dockerfile | grep '^[-+]' | grep -v '^[-+][-+][-+] ' || true)"
+        if [[ -n "$changed" ]] \
+           && ! printf '%s\n' "$changed" | grep -Eqv '^[-+]ARG (CLAUDE_CODE_VERSION|CODEX_VERSION)='; then
+            for name in CLAUDE_CODE_VERSION CODEX_VERSION; do
+                aibox_pin_set "$name" "$(aibox_pin_default "$name")"
+            done
+            git -C "$SANDBOX_DIR" checkout -- Dockerfile
+            moved="${moved:+${moved}、}Dockerfile 里升级过的 CLI 版本号(现在记在 versions.env)"
+        fi
+    fi
+
+    [[ -z "$moved" ]] || echo "==> 已把 ${moved} 移到 ${AIBOX_STATE_DIR}(用户数据现在统一放在这里)" >&2
+    return 0
+}
 
 # ---- 子命令:help —— 打印命令速查(也认 -h / --help)----
 aibox_help() {
@@ -118,7 +280,7 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
   aibox tmp clear              清理已停止的临时容器(也可写作 prune)
   aibox tmp build [--no-cache] 只构建临时容器所用的基础镜像
   aibox tmp update [cc|codex]  检查 CLI 新版,确认后在现有镜像上增量更新(不带参两个都查)
-  aibox tmp version            显示 Dockerfile 锁定的 CLI 版本
+  aibox tmp version            显示临时容器镜像的 CLI 构建版本
 
 通用:
   aibox status                 一屏自检:服务 / 镜像 / 长期容器 / 临时容器
@@ -136,7 +298,7 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
   · 容器里 Claude Code 要贴宿主机剪贴板里的图,先 aibox clip install,然后按 Ctrl+V
     (不是 ⌘V —— ⌘V 会被终端截走当文本粘贴)。详见 clipboard-bridge/README.md。
   · Tab 补全:在 ~/.zshrc 或 ~/.bashrc 里 source "$SANDBOX_DIR/ai-box-completion.sh"
-  · 代理/时区/语言/自定义环境变量在 "$SANDBOX_DIR/aibox.conf" 配(aibox setup 可交互生成)。
+  · 代理/时区/语言/自定义环境变量在 "$AIBOX_CONF" 配(aibox setup 可交互生成)。
 HELP
 }
 if [[ "${1:-}" == "help" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -151,11 +313,31 @@ if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
     exit 0
 fi
 
+# aibox 是 macOS 宿主机上的启动器。在 Linux 容器里(包括长期容器)或用 root 运行时,$HOME 指向的
+# 不是 Mac 用户的 Home,读写 ~/.aibox 会把用户数据搬进容器盘或 root 的目录,所以直接拒绝。
+if [[ "$(uname -s)" != "Darwin" ]]; then
+    echo "错误: aibox 是 macOS 宿主机上的启动器,当前环境是 $(uname -s),请在 Mac 的终端里运行。" >&2
+    exit 1
+fi
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "错误: 请不要用 sudo 或 root 运行 aibox;需要管理员权限的步骤会单独提示。" >&2
+    exit 1
+fi
+
+# 内部用:安装向导(包括直接运行的 ./setup.sh)在修改配置前先把旧布局搬到 ~/.aibox
+if [[ "${1:-}" == "__relocate-state" ]]; then
+    aibox_relocate_state
+    exit 0
+fi
+
 # ---- 子命令:setup —— 安装向导(实现在 setup.sh;刚克隆仓库、还没有 aibox 命令时可直接运行它)----
 if [[ "${1:-}" == "setup" ]]; then
     shift
     exec bash "$SANDBOX_DIR/setup.sh" "$@"
 fi
+
+# 其余命令都先确认用户数据已在 ~/.aibox(setup --check 承诺不做修改,所以放在 setup 之后)
+aibox_relocate_state
 
 # ---- 子命令:clip —— 剪贴板图片桥接的宿主机侧(macOS launchd 常驻监听)----
 # 沙箱侧的 xclip 垫片已经烧进镜像,构建完就在;宿主机这半截是 macOS 上的常驻进程,
@@ -206,14 +388,11 @@ aibox_npm_latest() {
 }
 
 # ---- 子命令:tmp update —— 检查 claude/codex CLI 新版,确认后更新临时容器镜像 ----
-# 版本源用 npmmirror(与 Dockerfile 构建同一个源,查到的版本一定装得到)。
-# 流程:取 latest → 对比 Dockerfile 里的 ARG 版本 → 输出结果 → [y/N] 确认 →
-#       改写 ARG 行 + 增量构建(Dockerfile.update,在现有镜像上只叠一层 npm
-#       install,只下载有更新的包);增量失败可选回退全量构建。
-#       无更新/取消/查询失败都不碰 Dockerfile。
+# 版本源用 npmmirror(与镜像构建同一个源,查到的版本一定装得到)。
+# 流程:取 latest → 对比当前版本(Dockerfile 默认值与 versions.env 中较新者)→ [y/N] 确认 →
+#       写入 ~/.aibox/versions.env + 增量构建(Dockerfile.update,在现有镜像上只叠一层 npm
+#       install,只下载有更新的包);增量失败可选回退全量构建。程序目录里的文件一律不改。
 if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "update" ]]; then
-    DOCKERFILE="$SANDBOX_DIR/Dockerfile"
-
     TARGETS="claude codex"
     case "${2:-}" in
         "")        ;;
@@ -228,9 +407,9 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "update" ]]; then
     UPDATES=""   # 待更新列表,形如 " claude=2.1.205 codex=0.144.0"
     for t in $TARGETS; do
         argname="$(arg_of "$t")"
-        cur="$(sed -n "s/^ARG ${argname}=//p" "$DOCKERFILE")"
+        cur="$(aibox_pin "$argname")"
         if [[ -z "$cur" ]]; then
-            echo "错误: $DOCKERFILE 里找不到 ARG ${argname}=..." >&2
+            echo "错误: $SANDBOX_DIR/Dockerfile 里找不到 ARG ${argname}=..." >&2
             exit 1
         fi
         new="$(aibox_npm_latest "$(aibox_pkg_of "$t")" || true)"
@@ -254,20 +433,17 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "update" ]]; then
     ANSWER=""
     read -r -p "==> 确认更新以上版本并重建镜像?[y/N] " ANSWER || true
     if [[ "$ANSWER" != "y" && "$ANSWER" != "Y" ]]; then
-        echo "==> 已取消,Dockerfile 未改动。"
+        echo "==> 已取消,版本记录未改动。"
         exit 0
     fi
 
     NPM_SPECS=""    # 本次真正要装的包,如 "@anthropic-ai/claude-code@2.1.208"
     for u in $UPDATES; do
-        argname="$(arg_of "${u%%=*}")"
-        # BSD/GNU sed 通吃的就地改写:写临时文件再替换,不用 sed -i(两家语法不同)
-        sed "s/^ARG ${argname}=.*/ARG ${argname}=${u#*=}/" "$DOCKERFILE" > "$DOCKERFILE.tmp"
-        mv "$DOCKERFILE.tmp" "$DOCKERFILE"
+        aibox_pin_set "$(arg_of "${u%%=*}")" "${u#*=}"
         NPM_SPECS="$NPM_SPECS $(aibox_pkg_of "${u%%=*}")@${u#*=}"
     done
     NPM_SPECS="${NPM_SPECS# }"
-    echo "==> 已改写 Dockerfile 版本号。"
+    echo "==> 已把新版本记入 ${AIBOX_VERSIONS_FILE}。"
 
     # 优先增量更新:在现有镜像之上只叠一层 npm install(Dockerfile.update),
     # 不重跑 apt/locale/pip 等旧层、不依赖 builder 的层缓存(builder 删除/重建后
@@ -275,9 +451,9 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "update" ]]; then
     # 前提是本地已有 $IMAGE 镜像;没有就只能全量构建。
     if container image inspect "$IMAGE" >/dev/null 2>&1; then
         echo "==> 增量更新:在 $IMAGE 之上安装 $NPM_SPECS ..."
-        if (cd "$SANDBOX_DIR" && container build -f Dockerfile.update \
+        if aibox_build_in_context -f Dockerfile.update \
                 --build-arg BASE_IMAGE="$IMAGE" --build-arg NPM_SPECS="$NPM_SPECS" \
-                -t "$IMAGE" .); then
+                -t "$IMAGE"; then
             echo "==> 完成(增量)。新开的容器即为新版;正在运行的容器不受影响。"
             echo "    注:增量更新会给镜像叠加新层,多次更新后可用 aibox tmp build 全量重建压平。"
             exit 0
@@ -286,7 +462,7 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "update" ]]; then
         ANSWER=""
         read -r -p "==> 回退全量构建?(较慢,会重下所有依赖)[y/N] " ANSWER || true
         if [[ "$ANSWER" != "y" && "$ANSWER" != "Y" ]]; then
-            echo "==> 已跳过构建。版本号已写入 Dockerfile,稍后可用 aibox tmp build 全量构建生效。"
+            echo "==> 已跳过构建。新版本已记录,稍后可用 aibox tmp build 全量构建生效。"
             exit 1
         fi
     else
@@ -294,12 +470,13 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "update" ]]; then
     fi
 
     echo "==> 全量构建镜像 $IMAGE ..."
-    if (cd "$SANDBOX_DIR" && container build -t "$IMAGE" .); then
+    aibox_pin_args
+    if aibox_build_in_context "${AIBOX_PIN_ARGS[@]+"${AIBOX_PIN_ARGS[@]}"}" -t "$IMAGE"; then
         echo "==> 完成。新开的容器即为新版;正在运行的容器不受影响。"
     else
-        echo "==> 构建失败。版本号已改进 Dockerfile(改动本身无需回退)。" >&2
+        echo "==> 构建失败。新版本已记在 ${AIBOX_VERSIONS_FILE}(无需回退)。" >&2
         echo "    注意:此时重跑 aibox tmp update 会显示「已是最新」而不再构建," >&2
-        echo "    排查后请用 aibox tmp build(或手动: cd \"$SANDBOX_DIR\" && container build -t $IMAGE .)。" >&2
+        echo "    排查后请用 aibox tmp build 全量构建。" >&2
         exit 1
     fi
     exit 0
@@ -392,20 +569,6 @@ aibox_file_mtime() {
 # container --version 输出形如「container CLI version 1.6.0 (build: ...)」
 aibox_container_version() {
     container --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -n 1
-}
-
-# aibox_version_lt A B:A 比 B 旧时返回 0(逐段比较数字,兼容 Bash 3.2)
-aibox_version_lt() {
-    local a="$1" b="$2" x y
-    while [[ -n "$a" || -n "$b" ]]; do
-        x="${a%%.*}"; y="${b%%.*}"
-        x="${x:-0}"; y="${y:-0}"
-        if (( 10#$x < 10#$y )); then return 0; fi
-        if (( 10#$x > 10#$y )); then return 1; fi
-        [[ "$a" == *.* ]] && a="${a#*.}" || a=""
-        [[ "$b" == *.* ]] && b="${b#*.}" || b=""
-    done
-    return 1
 }
 
 # 给 status 用的一行说明
@@ -881,10 +1044,11 @@ if [[ "$AIBOX_MODE" == "dev" ]]; then
             # 长期容器镜像以基础镜像为底,所以两者按顺序一起构建
             shift
             echo "==> [1/2] 构建基础镜像 $IMAGE${*:+(附加参数: $*)}"
-            ( cd "$SANDBOX_DIR" && container build "$@" -t "$IMAGE" . ) || exit $?
+            aibox_pin_args
+            aibox_build_in_context "${AIBOX_PIN_ARGS[@]+"${AIBOX_PIN_ARGS[@]}"}" "$@" -t "$IMAGE" || exit $?
             echo "==> [2/2] 构建长期容器镜像 $DEV_IMAGE"
-            ( cd "$SANDBOX_DIR" && container build "$@" -f Dockerfile.dev \
-                --build-arg BASE_IMAGE="$IMAGE" -t "$DEV_IMAGE" . ) || exit $?
+            aibox_build_in_context "$@" -f Dockerfile.dev \
+                --build-arg BASE_IMAGE="$IMAGE" -t "$DEV_IMAGE" || exit $?
             aibox_dev_probe
             if [[ "$AIBOX_DEV_STATE" == "exists" ]]; then
                 echo "    注:已创建的长期容器继续使用自己的系统盘,不会换成新镜像;aibox 的辅助脚本会在每次启动时同步。"
@@ -1131,15 +1295,12 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "enter" ]]; then
         "$match" /usr/local/sbin/aibox-enter-shell
 fi
 
-# ---- 子命令:tmp build —— 只构建临时容器所用的基础镜像(tag 与上下文目录写死,其余参数透传)----
+# ---- 子命令:tmp build —— 只构建临时容器所用的基础镜像(tag 写死,其余参数透传)----
 if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "build" ]]; then
     shift
-    if [[ $# -gt 0 ]]; then
-        echo "==> 构建镜像 $IMAGE(上下文 $SANDBOX_DIR,附加参数: $*)"
-    else
-        echo "==> 构建镜像 $IMAGE(上下文 $SANDBOX_DIR)"
-    fi
-    ( cd "$SANDBOX_DIR" && container build "$@" -t "$IMAGE" . )
+    echo "==> 构建镜像 $IMAGE${*:+(附加参数: $*)}"
+    aibox_pin_args
+    aibox_build_in_context "${AIBOX_PIN_ARGS[@]+"${AIBOX_PIN_ARGS[@]}"}" "$@" -t "$IMAGE"
     exit $?
 fi
 
@@ -1209,15 +1370,25 @@ if [[ "$AIBOX_MODE" == "tmp" ]] && [[ "${1:-}" == "clear" || "${1:-}" == "prune"
     exit 0
 fi
 
-# ---- 子命令:tmp version —— 显示 Dockerfile 锁定的 CLI 版本(临时容器镜像的构建目标)----
+# ---- 子命令:tmp version —— 显示临时容器镜像的 CLI 构建版本(Dockerfile 默认值与 versions.env 取较新)----
 if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "version" ]]; then
-    cv="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null)"
-    xv="$(sed -n 's/^ARG CODEX_VERSION=//p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null)"
+    cv="$(aibox_pin CLAUDE_CODE_VERSION)"
+    xv="$(aibox_pin CODEX_VERSION)"
     if [[ -z "$cv$xv" ]]; then
         echo "读不到版本(检查 $SANDBOX_DIR/Dockerfile)。" >&2; exit 1
     fi
-    echo "claude-code: ${cv:-?}"
-    echo "codex:       ${xv:-?}"
+    for pin_name in CLAUDE_CODE_VERSION CODEX_VERSION; do
+        pin_value="$(aibox_pin "$pin_name")"
+        pin_note=""
+        if [[ -n "$pin_value" && "$pin_value" != "$(aibox_pin_default "$pin_name")" ]]; then
+            pin_note="(本机用 aibox tmp update 升级过,记在 ~/.aibox/versions.env)"
+        fi
+        if [[ "$pin_name" == "CLAUDE_CODE_VERSION" ]]; then
+            echo "claude-code: ${pin_value:-?}$pin_note"
+        else
+            echo "codex:       ${pin_value:-?}$pin_note"
+        fi
+    done
     echo "(这是临时容器镜像的构建目标,不保证与当前已构建镜像一致;查新版用 aibox tmp update;长期容器内的实际版本用 aibox version)"
     exit 0
 fi
@@ -1252,9 +1423,9 @@ if [[ "${1:-}" == "status" ]]; then
         img_ok=0; echo "  长期镜像   : 未构建或查不到(试 aibox build)"
     fi
     # 目标版本:读 Dockerfile 声明;不把它误报成已构建镜像中的实际版本
-    cv="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null)"
-    xv="$(sed -n 's/^ARG CODEX_VERSION=//p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null)"
-    echo "  镜像版本   : claude ${cv:-?} / codex ${xv:-?}(Dockerfile 锁定;长期容器内实际版本用 aibox version)"
+    cv="$(aibox_pin CLAUDE_CODE_VERSION)"
+    xv="$(aibox_pin CODEX_VERSION)"
+    echo "  镜像版本   : claude ${cv:-?} / codex ${xv:-?}(临时容器镜像的构建目标;长期容器内实际版本用 aibox version)"
     echo "  登录状态   : $AIBOX_STATE_DIR(两种容器共用)"
     echo "  剪贴板贴图 : $(aibox_clip_status_line)"
     if [[ "$svc_up" -eq 0 || "$img_ok" -eq 0 ]]; then
@@ -1343,7 +1514,6 @@ fi
 # ---- 统一配置:代理 / 时区 / 语言(aibox.conf,运行期可选)----
 # 优先级:已导出的同名环境变量 > 配置文件 aibox.conf > 默认(留空 / 跟随宿主机)。
 # 解析在宿主机侧做(时区/语言的「跟随宿主机」只有这里能取到),再通过 -e 传进容器。
-AIBOX_CONF="$SANDBOX_DIR/aibox.conf"
 # 先记住环境变量里已有的值(用于覆盖 + 标注来源)
 _env_proxy="${AIBOX_PROXY:-}"; _env_tz="${AIBOX_TZ:-}"; _env_lang="${AIBOX_LANG:-}"
 AIBOX_PROXY=""; AIBOX_TZ=""; AIBOX_LANG=""
@@ -1505,11 +1675,18 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
         # 机内用户的 $HOME 是系统盘上的 /home/<用户>,宿主 Home 挂在原路径;登录状态目录用宿主路径
         printf 'AIBOX_STATE_DIR=%s\n' "$AIBOX_STATE_DIR"
         printf 'AIBOX_HOST_UID=%s\n' "$(id -u)"
-        # 仓库在宿主 Home 内时,machine 里同一路径可见,root 步骤据此同步辅助脚本
-        case "$SANDBOX_DIR/" in
-            "$HOME"/*) printf 'AIBOX_REPO=%s\n' "$SANDBOX_DIR" ;;
-        esac
+        # 辅助脚本先暂存到 ~/.aibox/machine(宿主 Home 内,machine 里同一路径可见),root 步骤从那里同步
+        printf 'AIBOX_STAGE=%s\n' "$AIBOX_MACHINE_STAGE"
     } > "$AIBOX_DEV_SYSTEM_FILE"
+    mkdir -p "$AIBOX_MACHINE_STAGE"
+    for dev_helper in dev-profile.sh dev-shell.sh dev-configure.sh dev-proxy-run.sh dev-tools.sh \
+                      aibox-dev-proxy.service; do
+        if ! cp "$SANDBOX_DIR/$dev_helper" "$AIBOX_MACHINE_STAGE/$dev_helper"; then
+            echo "错误: 无法暂存长期容器辅助脚本 ${dev_helper}。" >&2
+            exit 1
+        fi
+    done
+    unset dev_helper
     AIBOX_DEV_CUSTOM_NAMES=""
     AIBOX_ENV_INDEX=0
     while (( AIBOX_ENV_INDEX < ${#AIBOX_CUSTOM_ENV_NAMES[@]} )); do
@@ -1553,14 +1730,7 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
     # 长期容器的系统盘不会随镜像重建而更新。每次启动先把仓库里的辅助脚本同步进去
     # (登录 profile、shell 包装、代理服务、CLI 管理脚本,以及 third_party/gost),
     # 已有的长期容器无需重建即可用上新行为;
-    # 再执行同步后的系统配置脚本。仓库不在 Home 内时 machine 里看不到它,只能沿用镜像里的版本。
-    case "$SANDBOX_DIR/" in
-        "$HOME"/*) ;;
-        *)
-            echo "==> 提示: 仓库不在宿主 Home 内,长期容器里的 aibox 辅助脚本无法自动同步;" >&2
-            echo "    如行为与当前版本不符,请 aibox build 后 aibox delete 并重新创建。" >&2
-            ;;
-    esac
+    # 再执行同步后的系统配置脚本。脚本从 ~/.aibox/machine 取,程序目录放在哪里都不影响。
     # container machine run(1.0.0 实测)不按 argv 原样传参,而是把参数用空格拼成一行交给机内 bash
     # 重新解析。脚本首行写成 ":",拼接后第一行是合法的 /bin/sh -c :,其余各行由外层 shell 执行;
     # 若将来按 argv 原样传参,则整段交给 /bin/sh。两种语义下行为一致,所以脚本只用 POSIX 语法。
@@ -1580,21 +1750,22 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
                 fi
             done
         fi
-        repo="${AIBOX_REPO:-}"
-        if [ -n "$repo" ] && [ -r "$repo/dev-shell.sh" ]; then
-            install -m 0644 "$repo/dev-profile.sh" /etc/profile.d/aibox-dev.sh
-            install -m 0755 "$repo/dev-shell.sh" /usr/local/bin/aibox-dev-shell
-            install -m 0755 "$repo/dev-configure.sh" /usr/local/sbin/aibox-dev-configure
-            install -m 0755 "$repo/dev-proxy-run.sh" /usr/local/sbin/aibox-dev-proxy-run
-            install -m 0755 "$repo/dev-tools.sh" /usr/local/sbin/aibox-dev-tools
-            if ! cmp -s "$repo/aibox-dev-proxy.service" /etc/systemd/system/aibox-dev-proxy.service; then
-                install -m 0644 "$repo/aibox-dev-proxy.service" /etc/systemd/system/aibox-dev-proxy.service
+        stage="${AIBOX_STAGE:-}"
+        if [ -n "$stage" ] && [ -r "$stage/dev-shell.sh" ]; then
+            install -m 0644 "$stage/dev-profile.sh" /etc/profile.d/aibox-dev.sh
+            install -m 0755 "$stage/dev-shell.sh" /usr/local/bin/aibox-dev-shell
+            install -m 0755 "$stage/dev-configure.sh" /usr/local/sbin/aibox-dev-configure
+            install -m 0755 "$stage/dev-proxy-run.sh" /usr/local/sbin/aibox-dev-proxy-run
+            install -m 0755 "$stage/dev-tools.sh" /usr/local/sbin/aibox-dev-tools
+            if ! cmp -s "$stage/aibox-dev-proxy.service" /etc/systemd/system/aibox-dev-proxy.service; then
+                install -m 0644 "$stage/aibox-dev-proxy.service" /etc/systemd/system/aibox-dev-proxy.service
                 systemctl daemon-reload
             fi
-            # 创建长期容器时还没放 gost 的,后补的 gost 也能直接用上
-            if [ -f "$repo/third_party/gost" ] && ! cmp -s "$repo/third_party/gost" /usr/local/bin/gost; then
-                install -m 0755 "$repo/third_party/gost" /usr/local/bin/gost
-            fi
+        fi
+        # 创建长期容器时还没放 gost 的,后补的 gost 也能直接用上
+        gost_src="${AIBOX_STATE_DIR:-}/third_party/gost"
+        if [ -n "${AIBOX_STATE_DIR:-}" ] && [ -f "$gost_src" ] && ! cmp -s "$gost_src" /usr/local/bin/gost; then
+            install -m 0755 "$gost_src" /usr/local/bin/gost
         fi
         exec /usr/local/sbin/aibox-dev-configure
     '
@@ -1725,7 +1896,7 @@ CODEX_CREDS="$CODEX_STATE"
 # Gradle:不共用宿主机 ~/.gradle(内含平台相关原生库/文件锁/daemon 状态,
 #        macOS 与 Linux 容器共写同一份会损坏缓存),用沙箱专属目录,容器之间持久化。
 M2_REPO="$HOME/.m2/repository"
-GRADLE_CACHE="$SANDBOX_DIR/cache/gradle"
+GRADLE_CACHE="$AIBOX_CACHE_DIR/gradle"
 mkdir -p "$M2_REPO" "$GRADLE_CACHE"
 
 # 收集挂载参数:

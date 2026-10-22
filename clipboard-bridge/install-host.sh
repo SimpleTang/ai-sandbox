@@ -21,6 +21,9 @@ LABEL="com.local.clipbridge"
 PLIST_SRC="$SCRIPT_DIR/com.local.clipbridge.plist"
 PLIST_DST="$HOME/Library/LaunchAgents/$LABEL.plist"
 BRIDGE_DIR="$HOME/.clipboard-bridge"
+# launchd 配置里写的是监听脚本的绝对路径。程序目录可能随升级整体替换(例如 brew 每个版本
+# 一个目录),所以安装时把脚本复制到这里,launchd 指向这份副本;升级后 aibox clip restart 刷新。
+WATCHER_HOME="$HOME/.aibox/clipboard"
 DOMAIN="gui/$(id -u)"
 
 # 监听实现:默认 JXA。它用 NSPasteboard.changeCount(O(1) 整数)检测剪贴板变化;
@@ -73,6 +76,10 @@ do_install() {
 		sleep 0.1
 	done
 
+	mkdir -p "$WATCHER_HOME"
+	cp "$WATCHER" "$WATCHER_HOME/$(basename "$WATCHER")"
+	WATCHER="$WATCHER_HOME/$(basename "$WATCHER")"
+
 	sed -e "s|__SCRIPT__|$WATCHER|g" -e "s|__LANG__|$WATCHER_LANG|g" \
 		-e "s|__LOGDIR__|$BRIDGE_DIR|g" \
 		"$PLIST_SRC" > "$PLIST_DST"
@@ -120,7 +127,7 @@ do_restart() {
 do_uninstall() {
 	launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 	rm -f "$PLIST_DST"
-	rm -rf "$BRIDGE_DIR"
+	rm -rf "$BRIDGE_DIR" "$WATCHER_HOME"
 	echo "已停止并移除: $LABEL"
 	echo "(沙箱侧的 xclip 垫片在镜像里,不受影响;桥接目录一消失它就会安静地报告没有图)"
 }

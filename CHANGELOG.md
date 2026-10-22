@@ -4,6 +4,39 @@
 
 `aibox --version` 显示当前安装的版本。
 
+## [0.2.0] - 2026-10-22
+
+用户数据和状态统一放进 `~/.aibox/`，程序目录（git 克隆，或今后的 Homebrew 安装目录）只读、可以整体替换。这是打包成 Homebrew 的前提，也让 `git pull` 升级不再和本地改动冲突。
+
+English summary: all user data now lives in `~/.aibox/` (config, optional third_party assets, Gradle cache, CLI version pins, staged machine helpers), so the program directory is read-only and replaceable. Existing files are moved automatically on first run. `aibox tmp update` no longer edits the Dockerfile, builds use a staged context, the persistent container no longer requires the clone to be inside your home, and aibox now refuses to run outside macOS or as root.
+
+### 升级须知
+
+- **首次运行会自动搬家**：程序目录里的 `aibox.conf`、`third_party/` 里的 gost / JDK / Maven、`cache/gradle` 会被移到 `~/.aibox/` 下，并打印一行说明。原来的 `aibox.conf` 位置会留下一个指向新位置的软链接，照旧编辑那里也行。Gradle 缓存只在没有临时容器运行时才搬，否则下次再搬。
+- **用旧版 `aibox tmp update` 升级过 CLI 的**：如果 `Dockerfile` 的本地改动只有那两行版本号，会被提取到 `~/.aibox/versions.env`，并用 git 还原 `Dockerfile`；有其他改动则保持原样，需要自己处理。
+- **剪贴板贴图**：升级后运行一次 `aibox clip restart`，监听脚本会改为从 `~/.aibox/clipboard/` 运行，以后更换程序目录也不受影响。
+- **不需要重建镜像**，镜像配方没有变化。
+
+### 新增
+
+- `~/.aibox/versions.env`：`aibox tmp update` 确认后的 CLI 版本记在这里，构建时以 `--build-arg` 覆盖 `Dockerfile` 里的默认值；两者取较新的一个。`aibox tmp version` 会标出来自这里的版本。
+- `aibox` 拒绝在 macOS 以外的系统上、或以 root 身份运行（`help` 与 `--version` 除外）：在 Linux 容器里或 `sudo` 下，`$HOME` 指向的不是 Mac 用户的 Home。
+
+### 变更
+
+- 配置改为 `~/.aibox/aibox.conf`，`aibox setup` 也写到这里。
+- 可选组件改放 `~/.aibox/third_party/`。构建时在临时目录里组装上下文：程序文件按 `.dockerignore` 白名单从程序目录取，第三方组件从 `~/.aibox` 取（APFS 上用写时复制的克隆，大文件不占时间和空间），构建完即删除。
+- 临时容器的 Gradle 缓存改为 `~/.aibox/cache/gradle`。
+- `aibox tmp update` 不再修改 `Dockerfile`。
+- 长期容器的辅助脚本先暂存到 `~/.aibox/machine/` 再同步，程序目录不再需要放在 Home 内；gost 从 `~/.aibox/third_party/gost` 同步。
+- 剪贴板监听脚本在 `aibox clip install` 时复制到 `~/.aibox/clipboard/`，launchd 指向这份副本；`aibox clip uninstall` 一并删除。
+- `aibox build` / `aibox tmp build` 的附加参数排在版本参数之后，自己传的同名 `--build-arg` 会生效。
+- 程序目录里还留着已搬走的 `aibox.conf`、`third_party` 文件或 Gradle 缓存时，运行时会提示旧的那份已不再使用。
+
+### 修复
+
+- 发布说明开头多出的空行。
+
 ## [0.1.0] - 2026-10-22
 
 首个带版本号的发布。新增安装向导；默认的 `aibox` 改为长期容器，原来的一次性容器改用 `aibox tmp`；两种容器的 Claude / Codex 登录状态统一到 `~/.aibox/`。

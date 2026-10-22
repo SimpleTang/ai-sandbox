@@ -79,6 +79,7 @@ STUB_ENV_MODE="$TMP_ROOT/container.env-mode"
 STUB_HOST_ENV="$TMP_ROOT/container.host-env"
 STUB_CALLS="$TMP_ROOT/container.calls"
 STUB_ENV_LOG="$TMP_ROOT/container.env-log"
+STUB_BUILD_CONTEXT="$TMP_ROOT/container.build-context"
 STUB_LS_RUNNING=""
 STUB_LS_ALL=""
 STUB_MACHINE_LIST=""
@@ -94,9 +95,10 @@ ORIGINAL_PATH="$PATH"
 HOST_STUB_PATH="$STUB_BIN:$ORIGINAL_PATH"
 
 mkdir -p "$FIXTURE" "$STUB_BIN" "$TEST_HOME" "$RUN_TMP" "$PROJECT"
-cp "$ROOT/ai-box" "$ROOT/Dockerfile" "$ROOT/Dockerfile.dev" \
-    "$ROOT/entrypoint.sh" "$ROOT/dev-profile.sh" "$ROOT/dev-shell.sh" \
-    "$ROOT/dev-configure.sh" "$ROOT/dev-proxy-run.sh" "$ROOT/dev-tools.sh" "$FIXTURE/"
+cp "$ROOT/ai-box" "$ROOT/Dockerfile" "$ROOT/Dockerfile.dev" "$ROOT/Dockerfile.update" \
+    "$ROOT/.dockerignore" "$ROOT/entrypoint.sh" "$ROOT/network-lockdown.sh" "$ROOT/user-exec.sh" \
+    "$ROOT/enter-shell.sh" "$ROOT/dev-profile.sh" "$ROOT/dev-shell.sh" "$ROOT/dev-configure.sh" \
+    "$ROOT/dev-proxy-run.sh" "$ROOT/dev-tools.sh" "$ROOT/aibox-dev-proxy.service" "$FIXTURE/"
 cp -R "$ROOT/clipboard-bridge" "$FIXTURE/clipboard-bridge"
 
 cat > "$STUB_BIN/container" <<'STUB'
@@ -112,6 +114,11 @@ set -eu
     for arg in "$@"; do printf ' %s' "$arg"; done
     printf '\n'
 } >> "$STUB_CALLS"
+
+if [ "${1:-}" = "build" ]; then
+    # Record what the staged build context contains; the launcher runs build inside it.
+    find . -type f | sort > "$STUB_BUILD_CONTEXT"
+fi
 
 if [ "${1:-}" = "--version" ]; then
     echo "container CLI version ${STUB_CONTAINER_VERSION:-1.6.0} (build: release, commit: stub)"
@@ -262,11 +269,24 @@ cat > "$STUB_BIN/launchctl" <<'STUB'
 #!/bin/sh
 [ "${1:-}" != "print" ]
 STUB
-chmod +x "$STUB_BIN/container" "$STUB_BIN/curl" "$STUB_BIN/launchctl" "$FIXTURE/ai-box" "$FIXTURE/entrypoint.sh"
+# aibox only runs on macOS; pretend to be one unless a test asks otherwise.
+cat > "$STUB_BIN/uname" <<'STUB'
+#!/bin/sh
+case "${1:-}" in
+    -m) echo arm64 ;;
+    *)  echo "${STUB_UNAME:-Darwin}" ;;
+esac
+STUB
+chmod +x "$STUB_BIN/container" "$STUB_BIN/curl" "$STUB_BIN/launchctl" "$STUB_BIN/uname" \
+    "$FIXTURE/ai-box" "$FIXTURE/entrypoint.sh"
 
 fail() {
     echo "smoke test failed: $1" >&2
     exit 1
+}
+
+file_mode_of() {
+    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
 }
 
 assert_file_has_line() {
@@ -330,7 +350,7 @@ run_fixture() (
     export TMPDIR="$RUN_TMP"
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
-    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION
+    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
     export ANTHROPIC_API_KEY="host-anthropic-key-must-not-be-forwarded"
     unset OPENAI_API_KEY AIBOX_PROXY AIBOX_TZ AIBOX_LANG
     unset FIXED_SOCKS_HOST FIXED_SOCKS_PORT FIXED_SOCKS_USER FIXED_SOCKS_PASS
@@ -343,7 +363,7 @@ run_fixture_command() (
     export TMPDIR="$RUN_TMP"
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
-    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION
+    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
     unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
     unset FIXED_SOCKS_HOST FIXED_SOCKS_PORT FIXED_SOCKS_USER FIXED_SOCKS_PASS
     "$FIXTURE/ai-box" "$@"
@@ -356,7 +376,7 @@ printf 'choice=test\n' > "$TEST_HOME/.aibox/.migrated"
 
 # An explicitly empty indexed array must work under macOS Bash 3.2 + set -u and must
 # not create or mount an env-file.
-cat > "$FIXTURE/aibox.conf" <<'CONF'
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
 AIBOX_PROXY=""
 AIBOX_TZ="UTC"
 AIBOX_LANG="C.UTF-8"
@@ -605,7 +625,7 @@ assert_file_omits "$STUB_CALLS" 'CALL run' \
 
 # Values live only in the temporary env-file. PATH and HOME are intentionally included
 # to prove they do not alter how the host-side launcher finds the container stub or caches.
-cat > "$FIXTURE/aibox.conf" <<'CONF'
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
 AIBOX_PROXY=""
 AIBOX_TZ="UTC"
 AIBOX_LANG="C.UTF-8"
@@ -668,7 +688,7 @@ assert_file_omits "$STUB_ARGS" 'host-anthropic-key-must-not-be-forwarded' \
     "host ANTHROPIC_API_KEY value leaked into container argv"
 
 # Proxy mode must request only the capability needed for the entrypoint firewall.
-cat > "$FIXTURE/aibox.conf" <<'CONF'
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
 AIBOX_PROXY="socks5h://proxy.example.invalid:1080"
 AIBOX_TZ="UTC"
 AIBOX_LANG="C.UTF-8"
@@ -705,7 +725,7 @@ STUB_LS_ALL=""
 
 # The persistent development machine is created once, then machine run handles both
 # booting a stopped machine and opening its login shell.
-cat > "$FIXTURE/aibox.conf" <<'CONF'
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
 AIBOX_PROXY="socks5h://dev-proxy.example.invalid:1080"
 AIBOX_TZ="Asia/Shanghai"
 AIBOX_LANG="zh_CN.UTF-8"
@@ -982,22 +1002,22 @@ reset_stub_files
 STUB_IMAGE_PRESENT=1
 run_fixture_command tmp build --no-cache > "$TMP_ROOT/build.output" 2>&1 \
     || fail "ephemeral image build command failed"
-assert_file_contains "$STUB_CALLS" \
-    'CALL build --no-cache -t ai-sandbox:latest .' \
-    "tmp build omitted the ephemeral image"
+assert_file_contains "$STUB_CALLS" 'CALL build --build-arg CLAUDE_CODE_VERSION=' \
+    "tmp build did not pass the CLI versions"
+assert_file_contains "$STUB_CALLS" ' --no-cache -t ai-sandbox:latest .' \
+    "tmp build omitted the ephemeral image or the user's arguments"
 assert_file_omits "$STUB_CALLS" 'Dockerfile.dev' \
     "tmp build unexpectedly rebuilt the persistent machine image"
 
 reset_stub_files
 run_fixture_command build --no-cache > "$TMP_ROOT/dev-build.output" 2>&1 \
     || fail "image build command failed"
-assert_file_contains "$STUB_CALLS" \
-    'CALL build --no-cache -t ai-sandbox:latest .' \
+assert_file_contains "$STUB_CALLS" ' -t ai-sandbox:latest .' \
     "build omitted the base image"
 assert_file_contains "$STUB_CALLS" \
     'CALL build --no-cache -f Dockerfile.dev --build-arg BASE_IMAGE=ai-sandbox:latest -t ai-sandbox-dev:latest .' \
     "build omitted the persistent machine image"
-base_build_line="$(grep -n -m 1 'CALL build --no-cache -t ai-sandbox:latest' "$STUB_CALLS" | cut -d: -f1)"
+base_build_line="$(grep -n -m 1 ' -t ai-sandbox:latest' "$STUB_CALLS" | cut -d: -f1)"
 dev_build_line="$(grep -n -m 1 'Dockerfile.dev' "$STUB_CALLS" | cut -d: -f1)"
 (( base_build_line < dev_build_line )) || fail "build did not build the base image first"
 STUB_IMAGE_PRESENT=1
@@ -1049,28 +1069,28 @@ assert_rejected_before_container() {
     fi
 }
 
-cat > "$FIXTURE/aibox.conf" <<'CONF'
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
 AIBOX_ENV_VARS=(
     'BAD-NAME=invalid-name-value-must-stay-secret'
 )
 CONF
 assert_rejected_before_container invalid-name 'invalid-name-value-must-stay-secret'
 
-cat > "$FIXTURE/aibox.conf" <<'CONF'
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
 AIBOX_ENV_VARS=(
     'AIBOX_PRIVATE=reserved-name-value-must-stay-secret'
 )
 CONF
 assert_rejected_before_container reserved-name 'reserved-name-value-must-stay-secret'
 
-cat > "$FIXTURE/aibox.conf" <<'CONF'
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
 AIBOX_ENV_VARS=(
     $'CR_VALUE=cr-value-must-stay-secret\rsecond-line'
 )
 CONF
 assert_rejected_before_container carriage-return 'cr-value-must-stay-secret'
 
-cat > "$FIXTURE/aibox.conf" <<'CONF'
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
 AIBOX_ENV_VARS=(
     $'LF_VALUE=lf-value-must-stay-secret\nsecond-line'
 )
@@ -1205,12 +1225,135 @@ cmp -s "$TMP_ROOT/expected-entrypoint.result" "$ENTRYPOINT_RESULT" \
 # path, while an ephemeral container mounts only the project directory and needs
 # an extra read-only mount.
 
-cat > "$FIXTURE/aibox.conf" <<'CONF'
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
 AIBOX_PROXY=""
 AIBOX_TZ="UTC"
 AIBOX_LANG="C.UTF-8"
 AIBOX_ENV_VARS=()
 CONF
+
+# ---- v0.2.0: user data lives in ~/.aibox; the program directory stays read-only ----
+STATE="$TEST_HOME/.aibox"
+
+# aibox refuses to run outside macOS or as root: there $HOME is not the Mac user's home and
+# the state directory would land on a container disk or in root's home.
+reset_stub_files
+if PATH="$STUB_BIN:$ORIGINAL_PATH" STUB_UNAME=Linux HOME="$TEST_HOME" "$FIXTURE/ai-box" tmp list \
+    > "$TMP_ROOT/linux-guard.output" 2>&1; then
+    fail "aibox ran on a non-macOS system"
+fi
+assert_file_contains "$TMP_ROOT/linux-guard.output" 'macOS' "the non-macOS refusal did not explain itself"
+[ ! -e "$STUB_CALLED" ] || fail "the non-macOS refusal still reached the container CLI"
+PATH="$STUB_BIN:$ORIGINAL_PATH" STUB_UNAME=Linux "$FIXTURE/ai-box" --version > /dev/null \
+    || fail "aibox --version must work everywhere"
+
+# The old layout (config, third_party assets, Gradle cache in the program directory) moves
+# into ~/.aibox once. The config leaves a link behind so habits keep working.
+mv "$STATE/aibox.conf" "$TMP_ROOT/state-conf.saved"
+printf 'AIBOX_TZ="UTC"\n' > "$FIXTURE/aibox.conf"
+mkdir -p "$FIXTURE/third_party" "$FIXTURE/cache/gradle/caches"
+printf 'fake-gost\n' > "$FIXTURE/third_party/gost"
+printf 'cached\n' > "$FIXTURE/cache/gradle/caches/entry"
+reset_stub_files
+run_fixture_command status > "$TMP_ROOT/relocate.output" 2>&1 || fail "relocating the old layout failed"
+assert_file_contains "$TMP_ROOT/relocate.output" '已把' "relocation did not report what it moved"
+assert_file_has_line "$STATE/aibox.conf" 'AIBOX_TZ="UTC"' "aibox.conf was not moved into ~/.aibox"
+[ -L "$FIXTURE/aibox.conf" ] && [ "$(readlink "$FIXTURE/aibox.conf")" = "$STATE/aibox.conf" ] \
+    || fail "the old aibox.conf location does not link to the new one"
+[ "$(file_mode_of "$STATE/aibox.conf")" = "600" ] || fail "the moved aibox.conf is not mode 600"
+assert_file_has_line "$STATE/third_party/gost" 'fake-gost' "third_party/gost was not moved"
+[ ! -e "$FIXTURE/third_party/gost" ] || fail "third_party/gost was left in the program directory"
+assert_file_has_line "$STATE/cache/gradle/caches/entry" 'cached' "the Gradle cache was not moved"
+[ ! -e "$FIXTURE/cache" ] || fail "the old cache directory was left behind"
+run_fixture_command status > "$TMP_ROOT/relocate-again.output" 2>&1 || fail "a second run failed"
+assert_file_omits "$TMP_ROOT/relocate-again.output" '已把' "relocation ran twice"
+# A stale copy left in the old place is pointed out instead of silently ignored.
+printf 'stale-gost\n' > "$FIXTURE/third_party/gost"
+run_fixture_command status > "$TMP_ROOT/relocate-stale.output" 2>&1 || fail "status with a stale asset failed"
+assert_file_contains "$TMP_ROOT/relocate-stale.output" 'third_party/gost 已不再使用' \
+    "a stale third_party file in the program directory was ignored silently"
+assert_file_has_line "$STATE/third_party/gost" 'fake-gost' "a stale asset overwrote the active one"
+rm -f "$FIXTURE/third_party/gost"
+rm -f "$FIXTURE/aibox.conf"
+mv "$TMP_ROOT/state-conf.saved" "$STATE/aibox.conf"
+
+# Builds use a staged context: program files from the .dockerignore allowlist plus the
+# third_party assets from ~/.aibox; nothing else from either directory.
+printf 'local-secret\n' > "$FIXTURE/not-in-allowlist.txt"
+reset_stub_files
+run_fixture_command tmp build > "$TMP_ROOT/stage-build.output" 2>&1 || fail "staged build failed"
+for staged in ./Dockerfile ./entrypoint.sh ./.dockerignore ./third_party/gost ./clipboard-bridge/xclip-shim.sh; do
+    assert_file_has_line "$STUB_BUILD_CONTEXT" "$staged" "the build context is missing $staged"
+done
+assert_file_omits "$STUB_BUILD_CONTEXT" 'not-in-allowlist.txt' "the build context leaked a non-allowlisted file"
+assert_file_omits "$STUB_BUILD_CONTEXT" 'aibox.conf' "the build context leaked aibox.conf"
+if find "$RUN_TMP" -maxdepth 1 -name 'aibox-build.*' | grep -q .; then
+    fail "the staged build context was not cleaned up"
+fi
+rm -f "$FIXTURE/not-in-allowlist.txt"
+
+# aibox tmp update records upgrades in ~/.aibox/versions.env instead of editing the Dockerfile;
+# builds pass the newer version, and the Dockerfile default wins once it is newer.
+cp "$FIXTURE/Dockerfile" "$TMP_ROOT/Dockerfile.before"
+reset_stub_files
+printf 'y\n' | run_fixture_command tmp update cc > "$TMP_ROOT/tmp-update.output" 2>&1 \
+    || fail "aibox tmp update failed"
+cmp -s "$TMP_ROOT/Dockerfile.before" "$FIXTURE/Dockerfile" || fail "aibox tmp update edited the Dockerfile"
+assert_file_has_line "$STATE/versions.env" 'CLAUDE_CODE_VERSION=9.9.9' "the upgraded version was not recorded"
+assert_file_contains "$STUB_CALLS" 'NPM_SPECS=@anthropic-ai/claude-code@9.9.9' \
+    "the incremental update did not install the recorded version"
+run_fixture_command tmp version > "$TMP_ROOT/tmp-version.output" 2>&1 || fail "aibox tmp version failed"
+assert_file_contains "$TMP_ROOT/tmp-version.output" 'claude-code: 9.9.9' "tmp version ignored versions.env"
+reset_stub_files
+run_fixture_command tmp build > "$TMP_ROOT/pinned-build.output" 2>&1 || fail "pinned build failed"
+assert_file_contains "$STUB_CALLS" '--build-arg CLAUDE_CODE_VERSION=9.9.9' "the build ignored versions.env"
+printf 'CLAUDE_CODE_VERSION=0.0.1\n' > "$STATE/versions.env"
+reset_stub_files
+run_fixture_command tmp build > "$TMP_ROOT/older-pin-build.output" 2>&1 || fail "build with an older pin failed"
+default_claude="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$FIXTURE/Dockerfile")"
+assert_file_contains "$STUB_CALLS" "--build-arg CLAUDE_CODE_VERSION=$default_claude" \
+    "an older local version overrode a newer Dockerfile default"
+rm -f "$STATE/versions.env"
+# The user's own --build-arg comes after the recorded versions, so it wins.
+reset_stub_files
+run_fixture_command tmp build --build-arg CLAUDE_CODE_VERSION=1.2.3 > "$TMP_ROOT/user-arg-build.output" 2>&1 \
+    || fail "build with a user --build-arg failed"
+assert_file_contains "$STUB_CALLS" '--build-arg CLAUDE_CODE_VERSION=1.2.3 -t ai-sandbox:latest .' \
+    "a user --build-arg was not passed last"
+
+# A git checkout whose only local Dockerfile change is the CLI version lines (left by the old
+# aibox tmp update) gets them moved into versions.env and the Dockerfile restored.
+if command -v git >/dev/null 2>&1; then
+    git -C "$FIXTURE" init -q
+    git -C "$FIXTURE" -c user.email=t@example.invalid -c user.name=t add Dockerfile
+    git -C "$FIXTURE" -c user.email=t@example.invalid -c user.name=t commit -q -m base
+    sed 's/^ARG CODEX_VERSION=.*/ARG CODEX_VERSION=8.8.8/' "$FIXTURE/Dockerfile" > "$TMP_ROOT/Dockerfile.pinned"
+    cp "$TMP_ROOT/Dockerfile.pinned" "$FIXTURE/Dockerfile"
+    run_fixture_command status > "$TMP_ROOT/pin-relocate.output" 2>&1 || fail "relocating Dockerfile pins failed"
+    assert_file_has_line "$STATE/versions.env" 'CODEX_VERSION=8.8.8' "the old Dockerfile pin was not kept"
+    git -C "$FIXTURE" diff --quiet -- Dockerfile || fail "the Dockerfile was not restored"
+    # Other local Dockerfile edits belong to the user and stay untouched.
+    rm -f "$STATE/versions.env"
+    printf '# my change\n' >> "$FIXTURE/Dockerfile"
+    run_fixture_command status > "$TMP_ROOT/pin-keep.output" 2>&1 || fail "status with a custom Dockerfile failed"
+    [ ! -f "$STATE/versions.env" ] || fail "a user's own Dockerfile edits were treated as version pins"
+    grep -qxF '# my change' "$FIXTURE/Dockerfile" || fail "a user's own Dockerfile edits were reverted"
+    git -C "$FIXTURE" checkout -q -- Dockerfile
+    rm -rf "$FIXTURE/.git"
+fi
+
+# The persistent container syncs helpers from ~/.aibox/machine, so the program directory may
+# live anywhere (outside the home in a Homebrew install).
+reset_stub_files
+STUB_MACHINE_LIST="aibox-dev"
+run_fixture_command start > "$TMP_ROOT/stage-machine.output" 2>&1 || fail "start with staged helpers failed"
+for helper in dev-profile.sh dev-shell.sh dev-configure.sh dev-proxy-run.sh dev-tools.sh aibox-dev-proxy.service; do
+    cmp -s "$FIXTURE/$helper" "$STATE/machine/$helper" || fail "$helper was not staged for the machine"
+done
+assert_file_contains "$STUB_ENV_LOG" "AIBOX_STAGE=$STATE/machine" "the root step did not get the staging directory"
+assert_file_contains "$STUB_CALLS" '$stage/dev-shell.sh' "the root step does not sync from the staging directory"
+assert_file_contains "$STUB_CALLS" '/third_party/gost' "the root step does not sync gost from ~/.aibox"
+STUB_MACHINE_LIST=""
 
 CLIP_BRIDGE="$TEST_HOME/.clipboard-bridge"
 rm -rf "$CLIP_BRIDGE"
@@ -1486,7 +1629,7 @@ run_setup() (
     export PATH="$SETUP_BIN:$HOST_STUB_PATH"
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
-    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION
+    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
     unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
     unset FIXED_SOCKS_HOST FIXED_SOCKS_PORT FIXED_SOCKS_USER FIXED_SOCKS_PASS
     "$SETUP_FIXTURE/setup.sh" "$@"
@@ -1496,7 +1639,7 @@ run_setup() (
 setup_conf_values() (
     set +u
     AIBOX_ENV_VARS=()
-    . "$SETUP_FIXTURE/aibox.conf"
+    . "$SETUP_HOME/.aibox/aibox.conf"
     printf 'PROXY=%s\n' "$AIBOX_PROXY"
     printf 'TZ=%s\n' "$AIBOX_TZ"
     printf 'LANG=%s\n' "$AIBOX_LANG"
@@ -1504,10 +1647,6 @@ setup_conf_values() (
         printf 'ENV=%s\n' "$setup_entry"
     done
 )
-
-file_mode_of() {
-    stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"
-}
 
 STUB_LS_RUNNING=""
 STUB_IMAGE_PRESENT=1
@@ -1523,7 +1662,7 @@ assert_file_contains "$TMP_ROOT/setup-check.output" '还没有安装 aibox 命�
     "setup --check did not report the missing aibox command"
 [ ! -e "$SETUP_HOME/.local/bin/aibox" ] || fail "setup --check created the aibox link"
 [ ! -e "$SETUP_HOME/.zshrc" ] || fail "setup --check modified the shell profile"
-[ ! -e "$SETUP_FIXTURE/aibox.conf" ] || fail "setup --check created aibox.conf"
+[ ! -e "$SETUP_HOME/.aibox/aibox.conf" ] || fail "setup --check created aibox.conf"
 
 # A full first run. Answers follow the prompt order; invalid entries prove re-prompting,
 # the localhost proxy is rewritten to the container gateway, and the secret keeps quotes,
@@ -1553,8 +1692,8 @@ assert_file_has_line "$SETUP_HOME/.zshrc" 'export PATH="$HOME/.local/bin:$PATH"'
     "setup did not add ~/.local/bin to PATH"
 assert_file_has_line "$SETUP_HOME/.zshrc" "source '$SETUP_FIXTURE_REAL/ai-box-completion.sh'" \
     "setup did not enable completion"
-[ "$(file_mode_of "$SETUP_FIXTURE/aibox.conf")" = "600" ] || fail "aibox.conf is not mode 600"
-bash -n "$SETUP_FIXTURE/aibox.conf" || fail "generated aibox.conf has a syntax error"
+[ "$(file_mode_of "$SETUP_HOME/.aibox/aibox.conf")" = "600" ] || fail "aibox.conf is not mode 600"
+bash -n "$SETUP_HOME/.aibox/aibox.conf" || fail "generated aibox.conf has a syntax error"
 printf '%s\n' \
     "PROXY=$SETUP_PROXY_EXPECTED" 'TZ=UTC' 'LANG=zh_CN.UTF-8' \
     "ENV=ANTHROPIC_API_KEY=$SETUP_KEY_EXPECTED" > "$TMP_ROOT/setup-first.expected"
@@ -1571,7 +1710,7 @@ reset_stub_files
     export HOME="$SETUP_HOME" PATH="$HOST_STUB_PATH" TMPDIR="$RUN_TMP"
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
-    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION
+    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
     unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
     "$SETUP_FIXTURE/ai-box" tmp "$PROJECT"
 ) > "$TMP_ROOT/setup-launch.output" 2>&1 || fail "ai-box rejected the generated aibox.conf"
@@ -1580,7 +1719,7 @@ assert_file_has_line "$STUB_ENV_COPY" "ANTHROPIC_API_KEY=$SETUP_KEY_EXPECTED" \
 assert_arg_pair --cap-add CAP_NET_ADMIN
 
 # A second run skips finished steps and must not duplicate profile lines or touch the config.
-cp -p "$SETUP_FIXTURE/aibox.conf" "$TMP_ROOT/setup-conf.before"
+cp -p "$SETUP_HOME/.aibox/aibox.conf" "$TMP_ROOT/setup-conf.before"
 printf '%s\n' '' 'n' 'n' \
     | run_setup > "$TMP_ROOT/setup-second.output" 2>&1 && setup_status=0 || setup_status=$?
 [ "$setup_status" -eq 1 ] || fail "second setup run should still report gost (status $setup_status)"
@@ -1588,16 +1727,16 @@ printf '%s\n' '' 'n' 'n' \
     || fail "setup duplicated the PATH line"
 [ "$(grep -cxF "source '$SETUP_FIXTURE_REAL/ai-box-completion.sh'" "$SETUP_HOME/.zshrc")" -eq 1 ] \
     || fail "setup duplicated the completion line"
-cmp -s "$TMP_ROOT/setup-conf.before" "$SETUP_FIXTURE/aibox.conf" \
+cmp -s "$TMP_ROOT/setup-conf.before" "$SETUP_HOME/.aibox/aibox.conf" \
     || fail "declining to modify the config still changed it"
-if ls "$SETUP_FIXTURE"/aibox.conf.bak.* >/dev/null 2>&1; then
+if ls "$SETUP_HOME/.aibox"/aibox.conf.bak.* >/dev/null 2>&1; then
     fail "declining to modify the config created a backup"
 fi
 
 # Reconfiguring keeps current values by default, preserves unrelated AIBOX_ENV_VARS
 # entries, tightens loose permissions and backs up the previous file.
-printf '%s\n' "AIBOX_ENV_VARS+=('CUSTOM_KEEP=kept value')" >> "$SETUP_FIXTURE/aibox.conf"
-chmod 644 "$SETUP_FIXTURE/aibox.conf"
+printf '%s\n' "AIBOX_ENV_VARS+=('CUSTOM_KEEP=kept value')" >> "$SETUP_HOME/.aibox/aibox.conf"
+chmod 644 "$SETUP_HOME/.aibox/aibox.conf"
 printf '%s\n' \
     'y' 'y' \
     '' '' 'n' 'n' \
@@ -1616,8 +1755,8 @@ printf '%s\n' \
 setup_conf_values > "$TMP_ROOT/setup-third.actual" || fail "reconfigured aibox.conf cannot be sourced"
 cmp -s "$TMP_ROOT/setup-third.expected" "$TMP_ROOT/setup-third.actual" \
     || fail "reconfiguring did not keep existing values and unrelated entries"
-[ "$(file_mode_of "$SETUP_FIXTURE/aibox.conf")" = "600" ] || fail "reconfigured aibox.conf is not mode 600"
-setup_backup="$(ls "$SETUP_FIXTURE"/aibox.conf.bak.* 2>/dev/null | head -n 1)"
+[ "$(file_mode_of "$SETUP_HOME/.aibox/aibox.conf")" = "600" ] || fail "reconfigured aibox.conf is not mode 600"
+setup_backup="$(ls "$SETUP_HOME/.aibox"/aibox.conf.bak.* 2>/dev/null | head -n 1)"
 [ -n "$setup_backup" ] || fail "reconfiguring did not back up the previous config"
 [ "$(file_mode_of "$setup_backup")" = "600" ] || fail "config backup is not mode 600"
 grep -qF 'CUSTOM_KEEP' "$setup_backup" || fail "config backup does not hold the previous content"

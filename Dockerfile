@@ -8,8 +8,8 @@ FROM node:22-bookworm
 # 纯元数据层之前),前面的 apt / locale / 可选本地包 / ipcheck 层可复用缓存。
 #
 # 注意:日常升级 CLI 走的不是本文件全量构建 —— apple/container 的 builder 层缓存
-# 不可靠(builder 删除重建后全丢),全量构建常常等于重下所有依赖。`ai-box update`
-# 会改写本文件的版本 ARG(保持配方是唯一事实源),但实际构建用 Dockerfile.update
+# 不可靠(builder 删除重建后全丢),全量构建常常等于重下所有依赖。`aibox tmp update`
+# 把确认后的版本记在 ~/.aibox/versions.env(本文件不改),实际构建用 Dockerfile.update
 # 在现有镜像上增量叠一层 npm install。本文件用于首次构建、修改配方后的重建,
 # 以及多次增量更新后的「压平」重建(aibox build)。
 # ============================================================================
@@ -139,9 +139,9 @@ RUN echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
 # 后面仅剩 entrypoint 的本地 COPY 和 USER/ENTRYPOINT 等零成本元数据层。
 #   - Claude Code:  @anthropic-ai/claude-code
 #   - Codex CLI:    @openai/codex
-# 版本号由下面两个 ARG 锁定:宿主机跑 `ai-box update` 会查 npmmirror 最新版、
-# 输出对比结果并在确认后改写这两行;实际升级安装由 Dockerfile.update 增量完成
-# (见文件头注释),这两行保证之后任何一次全量重建都复现相同版本。
+# 下面两个 ARG 是随 aibox 发布的默认版本。宿主机跑 `aibox tmp update` 确认升级后,
+# 版本记在 ~/.aibox/versions.env;全量构建时 ai-box 取两者中较新的,用 --build-arg 传入,
+# 所以之后任何一次全量重建都复现相同版本。
 # npm 官方源在 builder 里可能同样解析不稳,改用淘宝镜像(通常不被污染)。
 # 注意:npm install -g 写 /usr/local,须以 root 执行。
 ARG CLAUDE_CODE_VERSION=2.1.233

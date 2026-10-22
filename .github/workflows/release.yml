@@ -33,10 +33,13 @@ jobs:
       - name: Extract the release notes from CHANGELOG.md
         run: |
           version="${GITHUB_REF_NAME#v}"
+          # 截取该版本的章节,去掉首尾空行
           awk -v v="$version" '
             index($0, "## [" v "]") == 1 { found = 1; next }
             found && /^## \[/ { exit }
-            found { print }
+            found && !started && /^[[:space:]]*$/ { next }
+            found { started = 1; lines[++n] = $0 }
+            END { while (n > 0 && lines[n] ~ /^[[:space:]]*$/) n--; for (i = 1; i <= n; i++) print lines[i] }
           ' CHANGELOG.md > release-notes.md
           if ! grep -q '[^[:space:]]' release-notes.md; then
             echo "::error::CHANGELOG.md has no section for $version"

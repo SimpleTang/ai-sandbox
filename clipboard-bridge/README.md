@@ -2,7 +2,7 @@
 
 让沙箱里的 Claude Code 支持用 **Ctrl+V 直接粘贴宿主机 macOS 剪贴板里的图片**。
 
-面向 `aibox` 与 `aibox dev` 两种模式，宿主机侧装一次即可。
+面向长期容器（`aibox`）与临时容器（`aibox tmp`）两种模式，宿主机侧装一次即可。
 
 ---
 
@@ -76,12 +76,12 @@ xclip -selection clipboard -t image/png -o > <临时文件> 2>/dev/null \
 
 | 模式 | 宿主 Home 挂载 | 桥接目录在沙箱内的路径 |
 |---|---|---|
-| `aibox dev` | `--home-mount rw`，整个 Home，同路径 | `/Users/<user>/.clipboard-bridge` |
-| `aibox` | 只挂项目目录 | `/run/aibox/clipboard-bridge`（ai-box 额外只读挂载） |
-| `aibox ~`（项目就是 Home） | 项目挂载已包含桥接目录 | `/workspace/<项目名>/.clipboard-bridge` |
+| `aibox`（长期容器） | `--home-mount rw`，整个 Home，同路径 | `/Users/<user>/.clipboard-bridge` |
+| `aibox tmp`（临时容器） | 只挂项目目录 | `/run/aibox/clipboard-bridge`（ai-box 额外只读挂载） |
+| `aibox tmp ~`（项目就是 Home） | 项目挂载已包含桥接目录 | `/workspace/<项目名>/.clipboard-bridge` |
 
 最后一行是特例：此时再单独挂一次等于同一宿主机路径被共享两次，会触发 apple/container
-的静默空挂载问题（见主 README「已知问题」），因此直接复用项目挂载里的那一份。
+的静默空挂载问题（见主 README「排障」），因此直接复用项目挂载里的那一份。
 
 垫片在 `CLIP_BRIDGE_DIR` 缺失时会自行兜底（先找 `/run/aibox/clipboard-bridge`，
 再找 `/Users/*/.clipboard-bridge`），所以绕过 `ai-box` 直接 `container machine run`
@@ -109,8 +109,8 @@ clipboard-bridge/
 └── img.sh                        兜底工具 → 镜像内 /usr/local/bin/aibox-img
 ```
 
-后两个由 `Dockerfile` COPY 进镜像，`aibox build`（以及基于它的 `aibox dev build`）
-之后开箱即用。前三个是 macOS 侧的东西，装不进任何镜像。
+后两个由 `Dockerfile` COPY 进镜像，`aibox build`（依次构建基础镜像和长期容器镜像）
+之后开箱即用。其余是 macOS 侧的东西，装不进任何镜像。
 
 ---
 
@@ -121,8 +121,7 @@ clipboard-bridge/
 无需操作 —— 已在镜像里。若镜像是加入本功能之前构建的，重建一次：
 
 ```bash
-aibox build
-aibox dev build     # 需要持久开发机时
+aibox build        # 依次构建基础镜像和长期容器镜像
 ```
 
 ### 宿主机侧（在 macOS 上执行一次）
@@ -132,6 +131,11 @@ aibox clip install
 ```
 
 装成 launchd 用户级常驻服务 `com.local.clipbridge`，开机自启。
+
+安装时监听脚本会被复制到 `~/.aibox/clipboard/`，launchd 配置
+（`~/Library/LaunchAgents/com.local.clipbridge.plist`）指向这份副本而不是程序目录里的原件，
+因此程序目录被整体替换或移动后监听照常运行。更新 aibox 后运行 `aibox clip restart`，
+把新版监听脚本复制过去并重新加载。
 
 ### 验证
 
@@ -143,7 +147,7 @@ aibox clip status
 
 看到「有图可粘」就成了。回到沙箱里的 Claude Code 按 **Ctrl+V**。
 
-`aibox status` 与 `aibox dev status` 也各有一行 `剪贴板贴图`，一屏自检时就能看到桥接
+`aibox status` 也有一行 `剪贴板贴图`，一屏自检时就能看到桥接
 是否正常，不必单独记 `aibox clip status`：
 
 ```
@@ -230,7 +234,8 @@ CLIP_BRIDGE_ONESHOT=0
 aibox clip uninstall
 ```
 
-沙箱侧的垫片留在镜像里不动 —— 桥接目录一消失，它就会安静地报告"没有图"，
+会停止监听并删除 launchd 配置、桥接目录 `~/.clipboard-bridge/` 和 `~/.aibox/clipboard/` 里的
+监听脚本副本。沙箱侧的垫片留在镜像里不动 —— 桥接目录一消失，它就会安静地报告"没有图"，
 不影响任何其他功能。
 
 ---
@@ -244,25 +249,26 @@ aibox clip uninstall
 | 粘出来是旧图 | 心跳超时保护（30 秒）。说明监听挂了，`aibox clip restart` |
 | 截图后要等几秒 | 多半是 macOS 的浮动缩略图，见上文「关于延迟」 |
 | 想换回 AppleScript 版 | `CLIPBRIDGE_IMPL=applescript aibox clip install` |
-| 改了监听脚本不生效 | 用 `aibox clip restart`（它会重新渲染 plist）；`aibox clip status` 第一行会打印当前实际加载的实现 |
+| 更新 aibox 或改了监听脚本后不生效 | 用 `aibox clip restart`（它会把监听脚本重新复制到 `~/.aibox/clipboard/` 并重新渲染 plist）；`aibox clip status` 第一行会打印当前实际加载的实现 |
 | `Bootstrap failed: 5` | `launchctl bootout` 是异步的，紧接着 bootstrap 会撞进未卸载完的窗口。安装器现在会等旧 job 消失再加载并重试；若仍失败，先手动 `launchctl bootout gui/$(id -u)/com.local.clipbridge` 再重跑 |
 | 沙箱里 `xclip` 不存在 | 镜像是加入本功能前构建的，重跑 `aibox build` |
-| 已有的 `aibox-dev` 里没有 | 持久开发机的系统盘不随镜像更新，见下方「已存在的开发机」 |
+| 已有的 `aibox-dev` 里没有 | 长期容器的系统盘不随镜像更新，见下方「已存在的长期容器」 |
 | 一次性容器里不生效 | 桥接目录必须在**容器启动前**就存在。先 `aibox clip install`，再开新容器 |
 
-### 已存在的开发机
+### 已存在的长期容器
 
-`aibox dev build` 只是重建镜像；已经创建过的 `aibox-dev` 有自己的持久系统盘，不会因此
-拿到垫片。要么重建机器（`aibox dev delete` 后再 `aibox dev`，会丢掉机内已安装的软件），
-要么在机内直接软链过去（脚本本体在宿主 Home 上，机器重启后依然有效）：
+`aibox build` 只是重建镜像；已经创建过的 `aibox-dev` 有自己的持久系统盘，不会因此
+拿到垫片。要么重建长期容器（`aibox delete` 后再 `aibox`，会丢掉机内已安装的软件），
+要么在机内直接软链过去（`<程序目录>` 换成实际路径；它必须在宿主 Home 内，机内才看得到；
+程序目录被替换或移动后需要重新链接）：
 
 ```bash
-sudo ln -snf ~/ai-sandbox/clipboard-bridge/xclip-shim.sh /usr/local/bin/xclip
-sudo ln -snf ~/ai-sandbox/clipboard-bridge/img.sh        /usr/local/bin/aibox-img
+sudo ln -snf <程序目录>/clipboard-bridge/xclip-shim.sh /usr/local/bin/xclip
+sudo ln -snf <程序目录>/clipboard-bridge/img.sh        /usr/local/bin/aibox-img
 ```
 
 ### 兜底方案（不依赖桥接）
 
 - `aibox-img` —— 打印宿主机最近的图片路径，直接把路径给 Claude Code
-- `aibox dev` 下 ⌘⇧4 截图默认存到桌面，沙箱里就是 `/Users/<user>/Desktop/...`
+- 长期容器（`aibox`）下 ⌘⇧4 截图默认存到桌面，沙箱里就是 `/Users/<user>/Desktop/...`
 - 从访达把文件拖进终端窗口，路径会自动填入

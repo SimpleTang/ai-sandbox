@@ -14,10 +14,16 @@ set -euo pipefail
 
 SANDBOX_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 AIBOX="$SANDBOX_DIR/ai-box"
-CONF="$SANDBOX_DIR/aibox.conf"
+# 用户数据统一在 ~/.aibox(见 ai-box 开头的说明);程序目录只读
+STATE_DIR="$HOME/.aibox"
+CONF="$STATE_DIR/aibox.conf"
 CONF_EXAMPLE="$SANDBOX_DIR/aibox.conf.example"
 COMPLETION="$SANDBOX_DIR/ai-box-completion.sh"
-GOST_PATH="$SANDBOX_DIR/third_party/gost"
+GOST_PATH="$STATE_DIR/third_party/gost"
+# 旧版放在程序目录里的位置;运行 aibox 时会自动搬到 ~/.aibox,--check 只读取并提示
+LEGACY_CONF="$SANDBOX_DIR/aibox.conf"
+LEGACY_GOST="$SANDBOX_DIR/third_party/gost"
+LEGACY_NOTE=""
 # 镜像名与 ai-box 保持一致
 IMAGE="ai-sandbox:latest"
 DEV_IMAGE="ai-sandbox-dev:latest"
@@ -650,20 +656,20 @@ gost_download() {
         bad "SHA-256 不符(得到 ${sum:-空值}),已丢弃。"
         return 1
     fi
-    mkdir -p "$SANDBOX_DIR/third_party"
+    mkdir -p "$(dirname "$GOST_PATH")"
     cp "$SETUP_TMP/gost" "$GOST_PATH"
     chmod 0755 "$GOST_PATH"
 }
 
-# 配置了代理就必须有 third_party/gost,否则容器拒绝启动
+# 配置了代理就必须有 ~/.aibox/third_party/gost,否则容器拒绝启动
 gost_ensure() {
     if [[ -f "$GOST_PATH" ]]; then
-        ok "已放入 gost(third_party/gost)"
+        ok "已放入 gost($(tilde "$GOST_PATH"))"
         return 0
     fi
-    bad "使用代理需要 third_party/gost(容器内的代理转换器),目前没有。"
+    bad "使用代理需要 $(tilde "$GOST_PATH")(容器内的代理转换器),目前没有。"
     if (( CHECK_ONLY )); then
-        pending "放入 third_party/gost 并重建镜像(见 README「可选的 third_party 组件」)"
+        pending "放入 $(tilde "$GOST_PATH") 并重建镜像(见 README「可选的 third_party 组件」)"
         return 0
     fi
     info "可以自动下载 gost $GOST_VERSION(Linux ARM64,MIT 许可证),并按 README 记录的 SHA-256 校验。"
@@ -672,7 +678,7 @@ gost_ensure() {
         NEED_REBUILD=1
         return 0
     fi
-    pending "放入 third_party/gost:从 $GOST_URL 解出 gost,放到 $(tilde "$GOST_PATH") 后重建镜像"
+    pending "放入 gost:从 $GOST_URL 解出 gost,放到 $(tilde "$GOST_PATH") 后重建镜像"
 }
 
 # 仅在从未创建 aibox.conf 时,ai-box 才会回退到旧的 FIXED_SOCKS_* 环境变量
@@ -799,6 +805,8 @@ conf_write() {
         env_block="$env_block  $(sq "$entry")"$'\n'
     done
     # 以 aibox.conf.example 为模板,只替换取值行,注释说明与示例保持同步
+    mkdir -p "$STATE_DIR"
+    chmod 700 "$STATE_DIR" 2>/dev/null || true
     CONF_TMP="$(mktemp "$CONF.tmp.XXXXXX")"
     chmod 600 "$CONF_TMP"
     {
@@ -838,7 +846,7 @@ conf_write() {
     fi
     mv -f -- "$CONF_TMP" "$CONF"
     CONF_TMP=""
-    ok "已写入 $(tilde "$CONF")(权限 600,不会被 Git 提交)"
+    ok "已写入 $(tilde "$CONF")(权限 600)"
     [[ -z "$backup" ]] || info "原配置已备份到 $(tilde "$backup")"
     return 0
 }
@@ -956,6 +964,7 @@ step_config() {
         return 0
     fi
 
+    [[ -z "$LEGACY_NOTE" ]] || info "$LEGACY_NOTE"
     if [[ -f "$CONF" ]]; then
         if ! bash -n "$CONF" 2>/dev/null; then
             bad "$(tilde "$CONF") 有 Bash 语法错误,aibox 启动时会失败。"
@@ -1156,7 +1165,21 @@ main() {
         info "          → 运行配置 → 迁移旧版数据 → 构建镜像 → 剪贴板贴图(可选)"
         info "已完成的步骤会自动跳过;随时可以 Ctrl+C 退出,重新运行会从未完成处继续。"
     fi
+    if (( CHECK_ONLY )); then
+        # 不做修改:旧位置的文件就地读取,并提示下次运行 aibox 时会搬走
+        if [[ ! -f "$CONF" && -f "$LEGACY_CONF" && ! -L "$LEGACY_CONF" ]]; then
+            CONF="$LEGACY_CONF"
+            LEGACY_NOTE="配置还在旧位置 $(tilde "$LEGACY_CONF"),下次运行 aibox 时会自动移到 ~/.aibox/。"
+        fi
+        if [[ ! -f "$GOST_PATH" && -f "$LEGACY_GOST" ]]; then
+            GOST_PATH="$LEGACY_GOST"
+        fi
+    fi
     step_host
+    if (( ! CHECK_ONLY )); then
+        # 确认是在 Mac 上之后,先把旧版放在程序目录里的配置、third_party、缓存搬到 ~/.aibox
+        bash "$AIBOX" __relocate-state || true
+    fi
     step_container
     step_service
     step_command
