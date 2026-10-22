@@ -49,7 +49,7 @@
 set -euo pipefail
 
 # aibox 自身的版本。发版时与 CHANGELOG.md 的条目和 git tag(v<版本>)保持一致。
-AIBOX_VERSION="0.2.0"
+AIBOX_VERSION="0.3.0"
 
 IMAGE="ai-sandbox:latest"
 DEV_IMAGE="ai-sandbox-dev:latest"
@@ -92,6 +92,17 @@ while [[ -h "$SCRIPT_PATH" ]]; do
     fi
 done
 SANDBOX_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" >/dev/null 2>&1 && pwd)"
+
+# 程序目录的稳定路径。Homebrew 把每个版本装在 <前缀>/Cellar/aibox/<版本>/libexec,升级后旧版本
+# 目录会被清理;对外给出路径(补全脚本等)时改用不随版本变化的 <前缀>/opt/aibox/libexec。
+AIBOX_STABLE_DIR="$SANDBOX_DIR"
+AIBOX_INSTALL_KIND="git"
+case "$SANDBOX_DIR" in
+    */Cellar/aibox/*/libexec)
+        AIBOX_STABLE_DIR="${SANDBOX_DIR%%/Cellar/aibox/*}/opt/aibox/libexec"
+        AIBOX_INSTALL_KIND="homebrew"
+        ;;
+esac
 
 # ---- 公共函数:版本比较、CLI 版本钉、构建上下文、旧布局搬迁 ----
 
@@ -297,7 +308,7 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
   · Claude / Codex 的登录状态在 ~/.aibox/,两种容器共用,与 Mac 本机 CLI 的 ~/.claude 分开。
   · 容器里 Claude Code 要贴宿主机剪贴板里的图,先 aibox clip install,然后按 Ctrl+V
     (不是 ⌘V —— ⌘V 会被终端截走当文本粘贴)。详见 clipboard-bridge/README.md。
-  · Tab 补全:在 ~/.zshrc 或 ~/.bashrc 里 source "$SANDBOX_DIR/ai-box-completion.sh"
+  · Tab 补全:在 ~/.zshrc 或 ~/.bashrc 里 source "$AIBOX_STABLE_DIR/ai-box-completion.sh"
   · 代理/时区/语言/自定义环境变量在 "$AIBOX_CONF" 配(aibox setup 可交互生成)。
 HELP
 }
@@ -308,8 +319,12 @@ fi
 
 # ---- --version:aibox 自身的版本;在 git 克隆里同时显示所在提交 ----
 if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
-    aibox_git_rev="$(git -C "$SANDBOX_DIR" describe --tags --always --dirty 2>/dev/null || true)"
-    echo "aibox ${AIBOX_VERSION}${aibox_git_rev:+ ($aibox_git_rev)}"
+    if [[ "$AIBOX_INSTALL_KIND" == "homebrew" ]]; then
+        echo "aibox ${AIBOX_VERSION} (Homebrew)"
+    else
+        aibox_git_rev="$(git -C "$SANDBOX_DIR" describe --tags --always --dirty 2>/dev/null || true)"
+        echo "aibox ${AIBOX_VERSION}${aibox_git_rev:+ ($aibox_git_rev)}"
+    fi
     exit 0
 fi
 

@@ -56,3 +56,37 @@ jobs:
           esac
           gh release create "$GITHUB_REF_NAME" --verify-tag $prerelease \
             --title "aibox $GITHUB_REF_NAME" --notes-file release-notes.md
+
+  homebrew:
+    # Point the tap's formula at the new release. Needs a HOMEBREW_TAP_TOKEN secret that can
+    # push to <owner>/homebrew-tap; without it the release still succeeds and this step skips.
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update the Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_REPO: ${{ github.repository_owner }}/homebrew-tap
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping the Homebrew tap update"
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          sha="$(curl -fsSL --retry 3 "$url" | sha256sum | cut -d' ' -f1)"
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+          cd tap
+          sed -i -E \
+            -e "s|^  url \".*\"|  url \"${url}\"|" \
+            -e "s|^  sha256 \".*\"|  sha256 \"${sha}\"|" \
+            Formula/aibox.rb
+          if git diff --quiet; then
+            echo "The formula already points at ${GITHUB_REF_NAME}."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -am "aibox ${version}"
+          git push

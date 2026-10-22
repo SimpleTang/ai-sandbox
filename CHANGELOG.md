@@ -4,6 +4,29 @@
 
 `aibox --version` 显示当前安装的版本。
 
+## [0.3.0] - 2026-10-22
+
+支持通过 Homebrew 安装：`brew install simpletang/tap/aibox`，然后运行 `aibox setup`。
+
+English summary: aibox can now be installed with Homebrew (`brew install simpletang/tap/aibox`, then `aibox setup`). The setup wizard recognizes Homebrew installs, removes a shadowing `~/.local/bin/aibox` left by a git clone, and points completion at the version-independent `opt/aibox` path. Releases update the tap's formula automatically.
+
+### 升级须知
+
+- git 克隆用户照常 `git pull` 即可，无需其他操作。
+- 想改用 Homebrew：`brew install simpletang/tap/aibox` 后运行一次 `aibox setup`，它会提议删除旧的 `~/.local/bin/aibox` 软链接，并把 Tab 补全改到 Homebrew 的路径（旧的补全行会被注释掉，不删除）。用户数据已经在 `~/.aibox`，确认无误后可以删除原来的克隆目录。
+- 不需要重建镜像。
+
+### 新增
+
+- Homebrew tap：`simpletang/tap`。配方不声明 Apple container 依赖，由 `aibox setup` 引导安装已验证的版本，避免和已用 `.pkg` 安装的 container 冲突。
+- 发布工作流在创建 Release 后自动更新 tap 里的配方（需要仓库密钥 `HOMEBREW_TAP_TOKEN`；未配置时跳过，不影响发布）。
+- `aibox --version` 会标出 Homebrew 安装。
+
+### 变更
+
+- 安装向导第 4 步识别 Homebrew 安装：不再创建 `~/.local/bin/aibox`，改为检查它是否被之前 git 克隆留下的软链接挡住并提议删除；Tab 补全使用不随版本变化的 `opt/aibox` 路径。shell 配置里指向别处的补全行会被注释掉（git 克隆搬家后也适用）。
+- `aibox help` 里的补全路径对 Homebrew 安装同样使用 `opt/aibox`。
+
 ## [0.2.0] - 2026-10-22
 
 用户数据和状态统一放进 `~/.aibox/`，程序目录（git 克隆，或今后的 Homebrew 安装目录）只读、可以整体替换。这是打包成 Homebrew 的前提，也让 `git pull` 升级不再和本地改动冲突。

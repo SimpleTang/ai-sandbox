@@ -1795,6 +1795,60 @@ assert_file_contains "$TMP_ROOT/setup-new-container.output" '尚未经过验证'
     "setup did not flag an unverified newer Apple container"
 STUB_CONTAINER_VERSION="1.6.0"
 
+# ---- Homebrew layout: <prefix>/Cellar/aibox/<version>/libexec, linked via opt/ and bin/ ----
+BREW="$TMP_ROOT/brew"
+BREW_LIBEXEC="$BREW/Cellar/aibox/9.9.9/libexec"
+mkdir -p "$BREW_LIBEXEC" "$BREW/bin" "$BREW/Cellar/aibox/9.9.9/bin"
+cp -R "$SETUP_FIXTURE/." "$BREW_LIBEXEC/"
+cp "$ROOT/.dockerignore" "$ROOT/Dockerfile.update" "$ROOT/network-lockdown.sh" "$ROOT/user-exec.sh" \
+    "$ROOT/enter-shell.sh" "$ROOT/dev-profile.sh" "$ROOT/dev-shell.sh" "$ROOT/dev-configure.sh" \
+    "$ROOT/dev-proxy-run.sh" "$ROOT/dev-tools.sh" "$ROOT/aibox-dev-proxy.service" "$BREW_LIBEXEC/"
+cp -R "$ROOT/clipboard-bridge" "$BREW_LIBEXEC/clipboard-bridge"
+rm -rf "$BREW_LIBEXEC/creds" "$BREW_LIBEXEC/cache"
+ln -s ../libexec/ai-box "$BREW/Cellar/aibox/9.9.9/bin/aibox"
+ln -s ../Cellar/aibox/9.9.9/bin/aibox "$BREW/bin/aibox"
+ln -s ../Cellar/aibox/9.9.9 "$BREW/opt/aibox" 2>/dev/null || { mkdir -p "$BREW/opt"; ln -s ../Cellar/aibox/9.9.9 "$BREW/opt/aibox"; }
+
+PATH="$STUB_BIN:$ORIGINAL_PATH" "$BREW/bin/aibox" --version | grep -q '(Homebrew)' \
+    || fail "aibox --version did not recognize a Homebrew install"
+
+# The wizard on a Homebrew install: the old ~/.local/bin/aibox link from the git clone shadows
+# the brew one, and the completion line still points at the clone. Both get fixed; the old
+# completion line is commented out, not deleted.
+[ -L "$SETUP_HOME/.local/bin/aibox" ] || fail "test setup: the clone link from earlier cases is missing"
+printf '%s\n' 'y' 'y' 'n' 'n' | (
+    export HOME="$SETUP_HOME" SHELL=/bin/zsh LANG=en_US.UTF-8 NO_COLOR=1 TMPDIR="$RUN_TMP"
+    export PATH="$SETUP_HOME/.local/bin:$BREW/bin:$SETUP_BIN:$HOST_STUB_PATH"
+    export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
+    export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
+    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
+    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
+    "$BREW_LIBEXEC/setup.sh"
+) > "$TMP_ROOT/setup-brew.output" 2>&1 || { cat "$TMP_ROOT/setup-brew.output" >&2; fail "the wizard on a Homebrew install reported pending steps"; }
+assert_file_contains "$TMP_ROOT/setup-brew.output" '通过 Homebrew 安装' "the wizard did not detect Homebrew"
+[ ! -e "$SETUP_HOME/.local/bin/aibox" ] || fail "the shadowing clone link was not removed"
+BREW_REAL="$(cd -P "$BREW" && pwd)"
+assert_file_has_line "$SETUP_HOME/.zshrc" "source '$BREW_REAL/opt/aibox/libexec/ai-box-completion.sh'" \
+    "completion was not switched to the stable opt path"
+grep -qF "# (aibox setup 已停用) source '$SETUP_FIXTURE_REAL/ai-box-completion.sh'" "$SETUP_HOME/.zshrc" \
+    || fail "the old completion line was not kept as a comment"
+[ "$(grep -c '^[^#]*ai-box-completion.sh' "$SETUP_HOME/.zshrc")" -eq 1 ] \
+    || fail "more than one active completion line remains"
+
+# A read-only program directory still works: config, builds and launches only write to ~/.aibox.
+chmod -R a-w "$BREW_LIBEXEC"
+reset_stub_files
+(
+    export HOME="$TEST_HOME" PATH="$HOST_STUB_PATH" TMPDIR="$RUN_TMP"
+    export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
+    export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
+    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
+    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
+    "$BREW/bin/aibox" tmp build && "$BREW/bin/aibox" tmp version && "$BREW/bin/aibox" tmp "$PROJECT"
+) > "$TMP_ROOT/brew-readonly.output" 2>&1 || { chmod -R u+w "$BREW_LIBEXEC"; fail "a read-only Homebrew install failed to build or launch"; }
+chmod -R u+w "$BREW_LIBEXEC"
+assert_file_contains "$STUB_CALLS" 'CALL run --rm -it' "the read-only install did not launch a temporary container"
+
 # Legacy login state that has not been migrated yet shows up as a pending step.
 mv "$SETUP_HOME/.aibox/.migrated" "$TMP_ROOT/setup-migrated.saved"
 mkdir -p "$SETUP_FIXTURE/creds/claude"

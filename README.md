@@ -39,7 +39,16 @@
 
 ## 安装
 
-### 推荐：安装向导
+### 方式一：Homebrew（推荐）
+
+```bash
+brew install simpletang/tap/aibox
+aibox setup
+```
+
+`aibox setup` 是安装向导，见下文。Homebrew 安装不声明 Apple container 依赖：向导会检查并引导安装本项目已验证的版本，也不会和已用官方 `.pkg` 装好的 container 冲突。升级用 `brew upgrade aibox`。
+
+### 方式二：git 克隆 + 安装向导
 
 ```bash
 git clone https://github.com/SimpleTang/ai-sandbox.git
@@ -52,7 +61,7 @@ cd ai-sandbox
 1. 检查 Mac 环境：Apple silicon 与 macOS 26。
 2. 安装 Apple container：可自动下载已验证版本（当前为 1.6.0）的官方安装包，核对 Apple 签名后打开系统安装器；也可以只打开下载页。已安装时检查版本：低于最低要求会提示升级，高于已验证版本只提示「未经验证」。
 3. 启动 container 服务；首次启动会下载 Apple 推荐的默认 Linux 内核。
-4. 安装 `aibox` 命令：在 `~/.local/bin` 创建软链，按需把该目录加入 `PATH` 并启用 Tab 补全（写入 `~/.zshrc`，bash 用户为 `~/.bash_profile`）。
+4. 安装 `aibox` 命令：git 克隆时在 `~/.local/bin` 创建软链，按需把该目录加入 `PATH`；Homebrew 安装时由 brew 提供命令，向导只检查有没有被之前 git 克隆留下的 `~/.local/bin/aibox` 挡住，有就提议删除。然后启用 Tab 补全（写入 `~/.zshrc`，bash 用户为 `~/.bash_profile`；Homebrew 安装使用不随版本变化的 `opt/aibox` 路径）；已有指向别处的补全行会被注释掉，不会删除。
 5. 生成 `~/.aibox/aibox.conf`（权限 `600`）：代理、时区、语言和认证方式（容器内账号登录或 API key）。选择代理时会校验地址格式，把 `127.0.0.1` 这类容器内不可达的地址换成宿主机在容器网络中的地址，可自动下载 gost 并按下文记录的 SHA-256 校验，还可以测试代理能否访问 Claude API。已有配置时默认保留；修改会先备份原文件，并保留 `AIBOX_ENV_VARS` 中与认证无关的条目。
 6. 迁移旧版数据：发现旧版留下的登录状态和配置时，选择用长期容器的、临时容器的或合并（详见「认证」一节）。旧版放在程序目录里的 `aibox.conf`、`third_party/` 文件和 Gradle 缓存会在第 1 步之后自动移到 `~/.aibox/`（见「用户数据目录」）。
 7. 构建镜像：两个镜像 `ai-sandbox:latest`（基础镜像，临时容器使用）和 `ai-sandbox-dev:latest`（长期容器镜像）都需要，缺任一个就运行 `aibox build` 依次构建。
@@ -445,6 +454,20 @@ java -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8080 \
 
 ## 更新
 
+### 升级 aibox 本身
+
+```bash
+brew upgrade aibox                 # Homebrew 安装
+git -C /path/to/ai-sandbox pull    # git 克隆
+aibox clip restart                 # 启用过剪贴板贴图时，刷新监听脚本
+```
+
+用户数据在 `~/.aibox`，升级不会动它。各版本的变化与升级须知见 [CHANGELOG.md](CHANGELOG.md)。
+
+从 git 克隆切换到 Homebrew：`brew install simpletang/tap/aibox` 后运行一次 `aibox setup`，它会处理旧的 `~/.local/bin/aibox` 软链接和补全配置；确认无误后可以删除原来的克隆目录。
+
+### Claude Code / Codex
+
 长期容器有自己的可写系统盘，创建后不会随镜像更新，CLI 直接在系统盘里升级：
 
 ```bash
@@ -518,7 +541,7 @@ aibox build                                          # 有 Apple container 环�
 
 ## 卸载
 
-先结束容器，再删除镜像、软链和仓库：
+先结束容器，再删除镜像和程序（Homebrew 安装用 `brew uninstall aibox` 代替最后删软链和克隆目录这两步，需要的话再 `brew untap simpletang/tap`）：
 
 ```bash
 aibox tmp stop --all

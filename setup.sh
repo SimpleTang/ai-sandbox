@@ -18,7 +18,19 @@ AIBOX="$SANDBOX_DIR/ai-box"
 STATE_DIR="$HOME/.aibox"
 CONF="$STATE_DIR/aibox.conf"
 CONF_EXAMPLE="$SANDBOX_DIR/aibox.conf.example"
-COMPLETION="$SANDBOX_DIR/ai-box-completion.sh"
+# Homebrew 把每个版本装在 <前缀>/Cellar/aibox/<版本>/libexec,升级后旧目录会被清理;
+# 写进 shell 配置的路径要用不随版本变化的 <前缀>/opt/aibox/libexec。
+INSTALL_KIND="git"
+BREW_PREFIX=""
+STABLE_DIR="$SANDBOX_DIR"
+case "$SANDBOX_DIR" in
+    */Cellar/aibox/*/libexec)
+        INSTALL_KIND="homebrew"
+        BREW_PREFIX="${SANDBOX_DIR%%/Cellar/aibox/*}"
+        STABLE_DIR="$BREW_PREFIX/opt/aibox/libexec"
+        ;;
+esac
+COMPLETION="$STABLE_DIR/ai-box-completion.sh"
 GOST_PATH="$STATE_DIR/third_party/gost"
 # 旧版放在程序目录里的位置;运行 aibox 时会自动搬到 ~/.aibox,--check 只读取并提示
 LEGACY_CONF="$SANDBOX_DIR/aibox.conf"
@@ -501,10 +513,105 @@ link_shadow_check() {
     fi
 }
 
+# 把 shell 启动文件里指向别处的 ai-box-completion.sh 行注释掉(不删除),例如从 git 克隆换成
+# Homebrew 安装、或克隆目录搬了家之后。原样改写文件内容,保留软链接形式的启动文件。
+rc_disable_old_completion() {
+    local rc="$1" tmp
+    tmp="$(mktemp "${TMPDIR:-/tmp}/aibox-rc.XXXXXX")"
+    awk -v keep="$COMPLETION" '
+        /^[^#]*ai-box-completion\.sh/ && index($0, keep) == 0 { print "# (aibox setup 已停用) " $0; next }
+        { print }
+    ' "$rc" > "$tmp" && cat "$tmp" > "$rc"
+    rm -f -- "$tmp"
+}
+
+# Homebrew 安装:aibox 由 brew 链接到 <前缀>/bin,不需要 ~/.local/bin 软链接;
+# 但之前 git 克隆时建的 ~/.local/bin/aibox 若排在 PATH 前面,会挡住 brew 安装的这个。
+step_command_homebrew() {
+    local found real
+    ok "通过 Homebrew 安装($(tilde "$BREW_PREFIX/bin/aibox"))"
+    hash -r
+    found="$(command -v aibox 2>/dev/null || true)"
+    if [[ -z "$found" ]]; then
+        bad "PATH 里找不到 aibox:$BREW_PREFIX/bin 不在 PATH 中。"
+        info "按 Homebrew 的安装提示,把 eval \"\$($BREW_PREFIX/bin/brew shellenv)\" 加入 shell 启动文件。"
+        pending "把 Homebrew 加入 PATH"
+        return 0
+    fi
+    real="$(real_path "$found" 2>/dev/null || true)"
+    case "$real" in
+        "$BREW_PREFIX"/Cellar/aibox/*)
+            LINK_OK=1
+            return 0
+            ;;
+    esac
+    warn "PATH 里更靠前的 $(tilde "$found") 指向 $(tilde "${real:-未知位置}"),不是 Homebrew 安装的 aibox。"
+    if [[ "$found" == "$LINK_PATH" && -L "$LINK_PATH" ]]; then
+        info "这多半是之前用 git 克隆安装时建的软链接;删掉后输入 aibox 就会用 Homebrew 安装的版本。"
+        if (( CHECK_ONLY )); then
+            pending "删除旧的 $(tilde "$LINK_PATH")"
+        elif ask_yn "删除 $(tilde "$LINK_PATH")?" Y; then
+            rm -f -- "$LINK_PATH"
+            hash -r
+            ok "已删除 $(tilde "$LINK_PATH")"
+            LINK_OK=1
+        else
+            pending "删除旧的 $(tilde "$LINK_PATH")"
+        fi
+    else
+        pending "调整 PATH,让 $(tilde "$BREW_PREFIX/bin") 排在 $(tilde "$(dirname "$found")") 前面"
+    fi
+}
+
 step_command() {
     local real rc
     step 4 "安装 aibox 命令"
 
+    if [[ "$INSTALL_KIND" == "homebrew" ]]; then
+        step_command_homebrew
+        rc="$(shell_rc || true)"
+    else
+        step_command_git
+        rc="$(shell_rc || true)"
+        step_command_path "$rc"
+    fi
+
+    [[ -n "$rc" ]] || return 0
+    if [[ -f "$rc" ]] && grep -qF "$COMPLETION" "$rc" \
+       && grep -Eq "^[^#]*ai-box-completion\.sh" "$rc"; then
+        ok "Tab 补全已配置"
+        if grep -E '^[^#]*ai-box-completion\.sh' "$rc" | grep -qvF "$COMPLETION"; then
+            warn "$(tilde "$rc") 里还有指向别处的补全行。"
+            if (( ! CHECK_ONLY )) && ask_yn "把那些旧行注释掉?" Y; then
+                rc_disable_old_completion "$rc"
+                RC_CHANGED="$rc"
+                ok "已注释掉旧的补全行"
+            fi
+        fi
+        return 0
+    fi
+    if [[ -f "$rc" ]] && grep -Eq '^[^#]*ai-box-completion\.sh' "$rc"; then
+        warn "$(tilde "$rc") 里的 Tab 补全指向别的位置(旧的安装?),现在应为 $(tilde "$COMPLETION")。"
+        if (( CHECK_ONLY )); then
+            info "运行 aibox setup 可以自动改过来。"
+        elif ask_yn "改为当前安装的补全脚本(旧行会被注释掉,不删除)?" Y; then
+            rc_disable_old_completion "$rc"
+            rc_append "$rc" "" "# aibox:Tab 补全(由 aibox setup 添加)" "source $(sq "$COMPLETION")"
+            RC_CHANGED="$rc"
+            ok "已更新 $(tilde "$rc")"
+        fi
+    elif (( CHECK_ONLY )); then
+        info "可选:Tab 补全未配置。"
+    elif ask_yn "启用 Tab 补全(写入 $(tilde "$rc"))?" Y; then
+        rc_append "$rc" "" "# aibox:Tab 补全(由 aibox setup 添加)" "source $(sq "$COMPLETION")"
+        RC_CHANGED="$rc"
+        ok "已写入 $(tilde "$rc")"
+    fi
+}
+
+# git 克隆安装:在 ~/.local/bin 建指向仓库 ai-box 的软链接
+step_command_git() {
+    local real
     if [[ -L "$LINK_PATH" || -e "$LINK_PATH" ]]; then
         real="$(real_path "$LINK_PATH" 2>/dev/null || true)"
         if [[ "$real" == "$AIBOX" ]]; then
@@ -531,8 +638,12 @@ step_command() {
         fi
     fi
     (( LINK_OK )) && link_shadow_check
+    return 0
+}
 
-    rc="$(shell_rc || true)"
+# git 克隆安装:确认 ~/.local/bin 在 PATH 里
+step_command_path() {
+    local rc="$1"
     if path_has "$BIN_DIR"; then
         ok "$(tilde "$BIN_DIR") 已在 PATH 中"
     elif [[ -n "$rc" && -f "$rc" ]] && grep -Eq '^[^#]*\.local/bin' "$rc"; then
@@ -553,17 +664,6 @@ step_command() {
         else
             pending "把 $(tilde "$BIN_DIR") 加入 PATH"
         fi
-    fi
-
-    [[ -n "$rc" ]] || return 0
-    if [[ -f "$rc" ]] && grep -Eq '^[^#]*ai-box-completion\.sh' "$rc"; then
-        ok "Tab 补全已配置"
-    elif (( CHECK_ONLY )); then
-        info "可选:Tab 补全未配置。"
-    elif ask_yn "启用 Tab 补全(写入 $(tilde "$rc"))?" Y; then
-        rc_append "$rc" "" "# aibox:Tab 补全(由 aibox setup 添加)" "source $(sq "$COMPLETION")"
-        RC_CHANGED="$rc"
-        ok "已写入 $(tilde "$rc")"
     fi
 }
 

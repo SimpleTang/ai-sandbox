@@ -65,7 +65,19 @@ match that platform.
 
 ## Install
 
-### Recommended: setup wizard
+### Option 1: Homebrew (recommended)
+
+```bash
+brew install simpletang/tap/aibox
+aibox setup
+```
+
+`aibox setup` is the setup wizard described below. The formula does not declare Apple container as
+a dependency: the wizard checks for it and guides you to the version this project has verified,
+and it does not clash with an existing installation from Apple's `.pkg`. Upgrade with
+`brew upgrade aibox`.
+
+### Option 2: git clone and the setup wizard
 
 ```bash
 git clone https://github.com/SimpleTang/ai-sandbox.git
@@ -82,8 +94,12 @@ skips what is already done, so it is safe to interrupt and rerun:
    download page. An existing installation is version-checked: below the minimum it asks you to
    upgrade; newer than the verified version it only warns that the version is unverified.
 3. Start the container service. The first start downloads Apple's recommended default Linux kernel.
-4. Install the `aibox` command: symlink it into `~/.local/bin`, and optionally add that directory to
-   `PATH` and enable completion (in `~/.zshrc`, or `~/.bash_profile` for bash).
+4. Install the `aibox` command: for a git clone, symlink it into `~/.local/bin` and optionally add
+   that directory to `PATH`; for Homebrew, brew provides the command and the wizard only checks
+   that an old `~/.local/bin/aibox` from a git clone does not shadow it, offering to remove it.
+   Then enable completion (in `~/.zshrc`, or `~/.bash_profile` for bash; Homebrew installs use the
+   version-independent `opt/aibox` path). Existing completion lines pointing elsewhere are
+   commented out, not deleted.
 5. Create `~/.aibox/aibox.conf` (mode `600`): proxy, timezone, locale, and authentication (account
    login inside the container, or API keys). For a proxy it validates the URL, replaces addresses
    such as `127.0.0.1`, which a container cannot reach, with the host's address on the container
@@ -672,6 +688,23 @@ java -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8080 \
 
 ## Updates and Rebuilds
 
+### Upgrading aibox itself
+
+```bash
+brew upgrade aibox                 # Homebrew install
+git -C /path/to/ai-sandbox pull    # git clone
+aibox clip restart                 # if clipboard image pasting is enabled
+```
+
+User data in `~/.aibox` is left untouched by upgrades. See [CHANGELOG.md](CHANGELOG.md) for each
+release's changes and upgrade notes.
+
+To switch from a git clone to Homebrew, run `brew install simpletang/tap/aibox` and then
+`aibox setup` once; it handles the old `~/.local/bin/aibox` symlink and the completion line. Delete
+the old clone once everything works.
+
+### Claude Code and Codex
+
 The persistent container has its own writable system disk and does not change when its image is
 rebuilt, so its CLIs are upgraded in place. `aibox update`, optionally limited to `cc` or `codex`,
 first reads the versions installed in the machine, queries the npm mirror (npmmirror) for the latest
@@ -778,6 +811,9 @@ the maintainer privately through the contact method on their GitHub profile rath
 public issue.
 
 ## Uninstall
+
+With Homebrew, replace removing the symlink and the clone below with `brew uninstall aibox` (and
+`brew untap simpletang/tap` if you no longer need the tap).
 
 1. Stop running temporary containers with `aibox tmp stop --all`, remove stopped ones with
    `aibox tmp clear`, then delete the persistent container and its system disk with `aibox delete`
