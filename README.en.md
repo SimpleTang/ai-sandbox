@@ -41,8 +41,8 @@ complying with each service's terms and with applicable law.
 - An Apple silicon Mac.
 - macOS 26. Apple does not support older macOS releases for `container`.
 - [Apple container](https://github.com/apple/container) installed and available as `container`.
-  CLI 1.0.0 is the currently tested version. This project does not use Docker Desktop or the
-  `docker` command.
+  Version 1.6.0 is the currently verified version and 1.0.0 is the minimum. This project does not
+  use Docker Desktop or the `docker` command.
 - Bash 3.2 or later for `ai-box`; zsh and Bash completion are supported.
 - Enough memory and disk for the images, machine disk, caches, and projects. Temporary containers
   and the persistent container request `8192M` by default through `MEMORY` and `DEV_MEMORY`.
@@ -66,8 +66,10 @@ The wizard checks and completes the steps below. Each step inspects the current 
 skips what is already done, so it is safe to interrupt and rerun:
 
 1. Check the Mac: Apple silicon and macOS 26.
-2. Install Apple container: optionally download the latest official installer, verify Apple's
-   signature, and open the system installer, or just open the download page.
+2. Install Apple container: optionally download the official installer for the verified version
+   (currently 1.6.0), verify Apple's signature, and open the system installer, or just open the
+   download page. An existing installation is version-checked: below the minimum it asks you to
+   upgrade; newer than the verified version it only warns that the version is unverified.
 3. Start the container service. The first start downloads Apple's recommended default Linux kernel.
 4. Install the `aibox` command: symlink it into `~/.local/bin`, and optionally add that directory to
    `PATH` and enable completion (in `~/.zshrc`, or `~/.bash_profile` for bash).
@@ -115,8 +117,10 @@ sw_vers -productVersion  # expected: 26.x
 
 Follow Apple's current installation method:
 
-1. Open the [Releases page](https://github.com/apple/container/releases) and download the latest
-   Apple-signed installer package.
+1. Open the [Releases page](https://github.com/apple/container/releases) and download the
+   Apple-signed installer package (`container-<version>-installer-signed.pkg`). This project is
+   currently verified on 1.6.0; newer versions usually work, and `aibox status` marks them as
+   unverified.
 2. Double-click the `.pkg` and follow the installer. Enter an administrator password when prompted
    so it can install files under `/usr/local`.
 3. Start the system service and verify the CLI:
@@ -132,13 +136,18 @@ commands that enter the persistent container (`aibox`, `aibox cc`, `aibox start`
 `container system start` automatically when the service is not running. Temporary containers and
 `aibox build` do not start the service.
 
-To upgrade an existing installation using Apple's installed helper:
+To upgrade an existing installation, use Apple's installed helper. Passing `-v` with the version
+this project has verified is recommended; without arguments it installs the latest release.
+Upgrading stops all temporary and persistent containers and asks for an administrator password:
 
 ```bash
 container system stop
-/usr/local/bin/update-container.sh
+/usr/local/bin/update-container.sh -v 1.6.0
 container system start
 ```
+
+Adding `-f` lets the same helper reinstall an older version (for example `-v 1.0.0 -f`). The first
+line of `aibox status` shows the installed version next to the verified one.
 
 Installation, upgrade, and uninstall behavior may change between Apple container releases. Treat
 the [official installation instructions](https://github.com/apple/container#initial-install) as

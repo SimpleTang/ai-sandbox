@@ -74,6 +74,7 @@ STUB_MACHINE_INSPECT_FAIL=0
 STUB_DEV_SYSTEMD_FAIL=0
 STUB_MACHINE_HOME=""
 STUB_MACHINE_BUSY=""
+STUB_CONTAINER_VERSION="1.6.0"
 ORIGINAL_PATH="$PATH"
 HOST_STUB_PATH="$STUB_BIN:$ORIGINAL_PATH"
 
@@ -96,6 +97,11 @@ set -eu
     for arg in "$@"; do printf ' %s' "$arg"; done
     printf '\n'
 } >> "$STUB_CALLS"
+
+if [ "${1:-}" = "--version" ]; then
+    echo "container CLI version ${STUB_CONTAINER_VERSION:-1.6.0} (build: release, commit: stub)"
+    exit 0
+fi
 
 if [ "${1:-}" = "machine" ] && [ "${2:-}" = "list" ]; then
     if [ "${STUB_MACHINE_LIST_FAIL:-0}" -eq 1 ]; then
@@ -153,7 +159,7 @@ stub_machine_cmd() {
             [ -n "${STUB_MACHINE_BUSY:-}" ]
             return $?
             ;;
-        ls|cp|mv|ln|test)
+        ls|cp|mv|ln|test|tar)
             [ -n "${STUB_MACHINE_HOME:-}" ] || return 2
             stub_cmd="$1"
             shift
@@ -161,6 +167,11 @@ stub_machine_cmd() {
             for arg in "$@"; do
                 stub_mapped+=("${arg//\/home\/dev/$STUB_MACHINE_HOME}")
             done
+            if [ "$stub_cmd" = tar ] && [ -f "$STUB_MACHINE_HOME/fail-archive" ]; then
+                # A readable archive followed by failure must still abort migration.
+                "$stub_cmd" "${stub_mapped[@]}"
+                return 1
+            fi
             "$stub_cmd" "${stub_mapped[@]}"
             return $?
             ;;
@@ -298,7 +309,7 @@ run_fixture() (
     export TMPDIR="$RUN_TMP"
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
-    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY
+    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION
     export ANTHROPIC_API_KEY="host-anthropic-key-must-not-be-forwarded"
     unset OPENAI_API_KEY AIBOX_PROXY AIBOX_TZ AIBOX_LANG
     unset FIXED_SOCKS_HOST FIXED_SOCKS_PORT FIXED_SOCKS_USER FIXED_SOCKS_PASS
@@ -311,7 +322,7 @@ run_fixture_command() (
     export TMPDIR="$RUN_TMP"
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
-    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY
+    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION
     "$FIXTURE/ai-box" "$@"
 )
 
@@ -445,6 +456,52 @@ assert_file_has_line "$LEGACY_DST/claude/CLAUDE.md" 'tmp-md' \
 [ -L "$MACHINE_HOME_DIR/.claude" ] \
     || fail "choice 2 left the unused machine ~/.claude where non-login entry points still use it"
 
+# Codex daemon sockets cannot be copied to the host share. Skip the runtime endpoint,
+# retain credentials (including hidden files and links), and keep the original backup.
+reset_legacy
+mkdir -p "$MACHINE_HOME_DIR/.codex/app-server-daemon"
+printf 'machine-codex\n' > "$MACHINE_HOME_DIR/.codex/auth.json"
+printf 'hidden\n' > "$MACHINE_HOME_DIR/.codex/.hidden"
+ln -s auth.json "$MACHINE_HOME_DIR/.codex/auth-link"
+python3 - "$MACHINE_HOME_DIR/.codex/app-server-daemon/daemon-updater.sock" <<'PY'
+import os
+import socket
+import sys
+os.chdir(os.path.dirname(sys.argv[1]))
+with socket.socket(socket.AF_UNIX) as endpoint:
+    endpoint.bind(os.path.basename(sys.argv[1]))
+PY
+reset_stub_files
+printf '1\n' | run_fixture > "$TMP_ROOT/migrate-socket.output" 2>&1 \
+    || fail "migration failed on a Codex daemon socket"
+assert_file_has_line "$LEGACY_DST/codex/auth.json" 'machine-codex' \
+    "socket migration lost Codex credentials"
+assert_file_has_line "$LEGACY_DST/codex/.hidden" 'hidden' \
+    "socket migration lost a hidden file"
+[ "$(readlink "$LEGACY_DST/codex/auth-link")" = auth.json ] \
+    || fail "socket migration lost a symbolic link"
+[ ! -e "$LEGACY_DST/codex/app-server-daemon/daemon-updater.sock" ] \
+    || fail "migration copied a runtime socket"
+[ -S "$MACHINE_HOME_DIR"/.codex.pre-aibox-*/app-server-daemon/daemon-updater.sock ] \
+    || fail "migration did not retain the original socket in the backup"
+[ -f "$LEGACY_DST/.migrated" ] || fail "socket migration did not complete"
+
+# An archive producer failure must not be masked by successful extraction.
+reset_legacy
+touch "$MACHINE_HOME_DIR/fail-archive"
+reset_stub_files
+if printf '1\n' | run_fixture > "$TMP_ROOT/migrate-archive-fail.output" 2>&1; then
+    fail "migration ignored an archive producer failure"
+fi
+[ ! -f "$LEGACY_DST/.migrated" ] || fail "failed copying recorded completion"
+[ ! -L "$MACHINE_HOME_DIR/.claude" ] || fail "failed copying replaced the source"
+[ -d "$FIXTURE/creds" ] || fail "failed copying moved the checkout source"
+rm "$MACHINE_HOME_DIR/fail-archive"
+reset_stub_files
+printf '1\n' | run_fixture > "$TMP_ROOT/migrate-archive-retry.output" 2>&1 \
+    || fail "retrying an interrupted migration failed"
+[ -f "$LEGACY_DST/.migrated" ] || fail "retried migration did not complete"
+
 # Running Claude/Codex in the machine (or old temporary containers) would keep writing to the
 # old locations, so the migration warns and only proceeds on an explicit yes.
 reset_legacy
@@ -491,7 +548,7 @@ reset_stub_files
 printf '3\n' | run_fixture_command migrate > "$TMP_ROOT/migrate-explicit.output" 2>&1 \
     || fail "aibox migrate failed"
 [ -f "$LEGACY_DST/.migrated" ] || fail "aibox migrate did not record completion"
-assert_file_contains "$STUB_CALLS" 'CALL machine run --name aibox-dev cp -a /home/dev/.claude/.' \
+assert_file_contains "$STUB_CALLS" 'CALL machine run --name aibox-dev tar -cf - -C /home/dev/.claude .' \
     "aibox migrate did not copy the machine state from inside the machine"
 rm -f "$LEGACY_DST/.migrated"
 rm -rf "$FIXTURE/creds"
@@ -816,6 +873,8 @@ STUB_MACHINE_LIST="aibox-dev"
 STUB_MACHINE_INSPECT_FAIL=0
 run_fixture_command status > "$TMP_ROOT/dev-status.output" 2>&1 \
     || fail "reading the persistent machine status failed"
+assert_file_contains "$TMP_ROOT/dev-status.output" '1.6.0(已验证 1.6.0)' \
+    "status did not report the Apple container version against the verified one"
 assert_file_contains "$TMP_ROOT/dev-status.output" '== 长期容器 ==' \
     "dev status is missing its readable heading"
 assert_file_contains "$TMP_ROOT/dev-status.output" '运行状态   : 运行中' \
@@ -1400,7 +1459,7 @@ run_setup() (
     export PATH="$SETUP_BIN:$HOST_STUB_PATH"
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
-    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY
+    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION
     unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
     unset FIXED_SOCKS_HOST FIXED_SOCKS_PORT FIXED_SOCKS_USER FIXED_SOCKS_PASS
     "$SETUP_FIXTURE/setup.sh" "$@"
@@ -1485,7 +1544,7 @@ reset_stub_files
     export HOME="$SETUP_HOME" PATH="$HOST_STUB_PATH" TMPDIR="$RUN_TMP"
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
-    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY
+    export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION
     unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
     "$SETUP_FIXTURE/ai-box" tmp "$PROJECT"
 ) > "$TMP_ROOT/setup-launch.output" 2>&1 || fail "ai-box rejected the generated aibox.conf"
@@ -1555,6 +1614,20 @@ cmp -s "$TMP_ROOT/setup-fourth.expected" "$TMP_ROOT/setup-fourth.actual" \
 
 run_setup --check < /dev/null > "$TMP_ROOT/setup-final-check.output" 2>&1 \
     || fail "setup --check still reports pending items after a complete setup"
+
+# The wizard compares Apple container with the minimum and the verified versions.
+STUB_CONTAINER_VERSION="0.9.0"
+if run_setup --check < /dev/null > "$TMP_ROOT/setup-old-container.output" 2>&1; then
+    fail "setup --check accepted an Apple container below the minimum version"
+fi
+assert_file_contains "$TMP_ROOT/setup-old-container.output" 'update-container.sh -v 1.6.0' \
+    "setup did not explain how to upgrade an old Apple container"
+STUB_CONTAINER_VERSION="9.9.9"
+run_setup --check < /dev/null > "$TMP_ROOT/setup-new-container.output" 2>&1 \
+    || fail "a newer, unverified Apple container must only warn"
+assert_file_contains "$TMP_ROOT/setup-new-container.output" '尚未经过验证' \
+    "setup did not flag an unverified newer Apple container"
+STUB_CONTAINER_VERSION="1.6.0"
 
 # Legacy login state that has not been migrated yet shows up as a pending step.
 mv "$SETUP_HOME/.aibox/.migrated" "$TMP_ROOT/setup-migrated.saved"

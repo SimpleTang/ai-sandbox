@@ -25,7 +25,7 @@
 |---|---|
 | 主机 | Apple silicon Mac |
 | 操作系统 | macOS 26；Apple 官方不支持更旧版本 |
-| 容器运行时 | [Apple container](https://github.com/apple/container)（已在 CLI 1.0.0 验证；不是 Docker） |
+| 容器运行时 | [Apple container](https://github.com/apple/container)（已验证 1.6.0，最低要求 1.0.0；不是 Docker） |
 | 宿主脚本 | 兼容 macOS 自带 Bash 3.2；日常可从 zsh 调用 |
 | 容器架构 | Linux ARM64，基础镜像为 `node:22-bookworm` |
 | VM 内存 | 临时容器和长期容器默认均为 `8192M`；临时容器可在 `ai-box` 的 `MEMORY` 中调整，长期容器的 `DEV_MEMORY` 只在首次创建时使用，之后用 `aibox set memory=...` 调整 |
@@ -45,7 +45,7 @@ cd ai-sandbox
 向导会逐步检查并完成下面几件事。每一步先检测现状，已完成的自动跳过，所以可以随时中断、反复运行：
 
 1. 检查 Mac 环境：Apple silicon 与 macOS 26。
-2. 安装 Apple container：可自动下载最新的官方安装包，核对 Apple 签名后打开系统安装器；也可以只打开下载页。
+2. 安装 Apple container：可自动下载已验证版本（当前为 1.6.0）的官方安装包，核对 Apple 签名后打开系统安装器；也可以只打开下载页。已安装时检查版本：低于最低要求会提示升级，高于已验证版本只提示「未经验证」。
 3. 启动 container 服务；首次启动会下载 Apple 推荐的默认 Linux 内核。
 4. 安装 `aibox` 命令：在 `~/.local/bin` 创建软链，按需把该目录加入 `PATH` 并启用 Tab 补全（写入 `~/.zshrc`，bash 用户为 `~/.bash_profile`）。
 5. 生成 `aibox.conf`：代理、时区、语言和认证方式（容器内账号登录或 API key）。选择代理时会校验地址格式，把 `127.0.0.1` 这类容器内不可达的地址换成宿主机在容器网络中的地址，可自动下载 gost 并按下文记录的 SHA-256 校验，还可以测试代理能否访问 Claude API。已有配置时默认保留；修改会先备份原文件，并保留 `AIBOX_ENV_VARS` 中与认证无关的条目。
@@ -77,7 +77,7 @@ sw_vers -productVersion  # 应为 26.x
 
 按照 Apple 官方当前推荐方式安装：
 
-1. 打开 [Releases 页面](https://github.com/apple/container/releases)，下载最新的 Apple 签名安装包。
+1. 打开 [Releases 页面](https://github.com/apple/container/releases)，下载 Apple 签名安装包（`container-<版本>-installer-signed.pkg`）。本项目当前验证的是 1.6.0；更新的版本一般也能用，`aibox status` 会标出「未经验证」。
 2. 双击 `.pkg`，按安装器提示操作；系统会要求管理员密码，以便把文件安装到 `/usr/local`。
 3. 启动 container 系统服务并验证 CLI：
 
@@ -89,13 +89,15 @@ container list
 
 `container list` 即使没有运行中的容器也应能正常返回。之后进入长期容器的命令（`aibox`、`aibox cc`、`aibox start` 等）在服务未启动时会自动执行 `container system start`；临时容器和 `aibox build` 不会自动启动服务。
 
-已经安装旧版本时，Apple 提供的升级方式是先停止服务，再运行安装在 `/usr/local/bin` 下的更新脚本：
+已经安装旧版本时，Apple 提供的升级方式是先停止服务，再运行安装在 `/usr/local/bin` 下的更新脚本。建议用 `-v` 指定本项目已验证的版本；不带参数则升级到最新版。升级会停止所有临时容器和长期容器，并需要管理员密码：
 
 ```bash
 container system stop
-/usr/local/bin/update-container.sh
+/usr/local/bin/update-container.sh -v 1.6.0
 container system start
 ```
+
+同一脚本加 `-f` 也可以装回旧版本（例如 `-v 1.0.0 -f`）。`aibox status` 第一行会显示已安装版本与已验证版本。
 
 具体安装、升级或卸载行为可能随 Apple container 版本变化，请以[官方仓库说明](https://github.com/apple/container#initial-install)为准。
 

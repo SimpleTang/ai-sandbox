@@ -33,10 +33,12 @@ GOST_VERSION="3.2.6"
 GOST_URL="https://github.com/go-gost/gost/releases/download/v${GOST_VERSION}/gost_${GOST_VERSION}_linux_arm64.tar.gz"
 GOST_SHA256="343c3e003996ca0437b9cc47dd1500cd0475ba09f5a5f17e50851854e06a1ca7"
 
-# Apple container:取最新的官方签名安装包,打开前核对签名团队
-# (Developer ID Installer: Apple Inc. - Containerization)
+# Apple container:下载已验证版本的官方签名安装包,打开前核对签名团队
+# (Developer ID Installer: Apple Inc. - Containerization)。版本常量与 ai-box 保持一致。
+CONTAINER_MIN_VERSION="1.0.0"
+CONTAINER_TESTED_VERSION="1.6.0"
 CONTAINER_RELEASES_URL="https://github.com/apple/container/releases"
-CONTAINER_LATEST_API="https://api.github.com/repos/apple/container/releases/latest"
+CONTAINER_PKG_URL="https://github.com/apple/container/releases/download/${CONTAINER_TESTED_VERSION}/container-${CONTAINER_TESTED_VERSION}-installer-signed.pkg"
 CONTAINER_PKG_TEAM="UPBK2H6LZM"
 # 容器默认网络里宿主机的地址;查询失败时用这个已知默认值
 DEFAULT_GATEWAY="192.168.64.1"
@@ -281,6 +283,25 @@ container_found() {
     return 1
 }
 
+# container --version 输出形如「container CLI version 1.6.0 (build: ...)」
+container_version() {
+    container --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -n 1
+}
+
+# version_lt A B:A 比 B 旧时返回 0(逐段比较数字,兼容 Bash 3.2)
+version_lt() {
+    local a="$1" b="$2" x y
+    while [[ -n "$a" || -n "$b" ]]; do
+        x="${a%%.*}"; y="${b%%.*}"
+        x="${x:-0}"; y="${y:-0}"
+        if (( 10#$x < 10#$y )); then return 0; fi
+        if (( 10#$x > 10#$y )); then return 1; fi
+        [[ "$a" == *.* ]] && a="${a#*.}" || a=""
+        [[ "$b" == *.* ]] && b="${b#*.}" || b=""
+    done
+    return 1
+}
+
 # 与 aibox status 同一口径:能列容器即服务在跑
 service_running() { container ls >/dev/null 2>&1; }
 
@@ -330,15 +351,9 @@ step_host() {
 }
 
 # ---- 第 2 步:Apple container ----
-# 下载最新官方签名安装包到 ~/Downloads,核对签名后交给系统安装器
+# 下载已验证版本的官方签名安装包到 ~/Downloads,核对签名后交给系统安装器
 container_pkg_open() {
-    local api url name pkg sig
-    info "查询最新版本..."
-    api="$(curl -fsSL --max-time 30 "$CONTAINER_LATEST_API" 2>/dev/null)" || return 1
-    url="$(printf '%s\n' "$api" \
-        | sed -n 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"\([^"]*-installer-signed\.pkg\)".*/\1/p' \
-        | head -n 1)"
-    [[ -n "$url" ]] || return 1
+    local url="$CONTAINER_PKG_URL" name pkg sig
     name="${url##*/}"
     pkg="$HOME/Downloads/$name"
     mkdir -p "$HOME/Downloads"
@@ -363,8 +378,21 @@ step_container() {
     step 2 "安装 Apple container(容器运行时)"
     while true; do
         if container_found; then
-            ver="$(container --version 2>/dev/null | head -n 1 || true)"
-            ok "已安装${ver:+: $ver}"
+            ver="$(container_version || true)"
+            if [[ -z "$ver" ]]; then
+                warn "已安装,但读不到版本号(已验证版本 ${CONTAINER_TESTED_VERSION})。"
+            elif version_lt "$ver" "$CONTAINER_MIN_VERSION"; then
+                bad "已安装 ${ver},低于最低要求 ${CONTAINER_MIN_VERSION}。"
+                info "升级方法:container system stop,再运行 /usr/local/bin/update-container.sh -v ${CONTAINER_TESTED_VERSION},"
+                info "最后 container system start(升级会停止所有容器,需要管理员密码)。"
+                pending "升级 Apple container 到 ${CONTAINER_TESTED_VERSION}"
+            elif version_lt "$CONTAINER_TESTED_VERSION" "$ver"; then
+                warn "已安装 ${ver},比已验证的 ${CONTAINER_TESTED_VERSION} 新,尚未经过验证;遇到问题请反馈。"
+            elif version_lt "$ver" "$CONTAINER_TESTED_VERSION"; then
+                ok "已安装 ${ver}(可以使用;已验证的最新版本是 ${CONTAINER_TESTED_VERSION},可按需升级)"
+            else
+                ok "已安装 ${ver}(已验证版本)"
+            fi
             return 0
         fi
         bad "未找到 container 命令。"
@@ -373,7 +401,7 @@ step_container() {
             pending "安装 Apple container:$CONTAINER_RELEASES_URL"
             return 0
         fi
-        info "1) 自动下载最新官方安装包,核对 Apple 签名后打开安装器(推荐)"
+        info "1) 自动下载已验证的 ${CONTAINER_TESTED_VERSION} 官方安装包,核对 Apple 签名后打开安装器(推荐)"
         info "2) 用浏览器打开下载页,自己下载 .pkg 安装"
         info "3) 暂时跳过"
         ask_choice choice 3 1

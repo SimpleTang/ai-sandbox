@@ -3,8 +3,12 @@
 # The machine user's $HOME is /home/<user> on the system disk; the host home is
 # mounted at its original path, which the launcher records in /etc/aibox/state-dir.
 aibox_state_dir="$HOME/.aibox"
+# Use the shell builtin: a custom PATH from AIBOX_ENV_VARS may not contain /bin.
 if [ -r /etc/aibox/state-dir ]; then
-    aibox_state_dir="$(cat /etc/aibox/state-dir)"
+    aibox_state_line=""
+    IFS= read -r aibox_state_line < /etc/aibox/state-dir || true
+    [ -z "$aibox_state_line" ] || aibox_state_dir="$aibox_state_line"
+    unset aibox_state_line
 fi
 export CLAUDE_CONFIG_DIR="$aibox_state_dir/claude"
 export CODEX_HOME="$aibox_state_dir/codex"

@@ -53,6 +53,10 @@ DEV_MACHINE_NAME="aibox-dev"
 DEV_MEMORY="8192M"
 CONTAINER_PREFIX="aibox-"
 CONTAINER_OWNER_LABEL="com.simpletang.ai-sandbox.managed=true"
+# Apple container 版本:低于最低版本缺少依赖的命令;高于已验证版本只提示未经验证。
+# 改动这里前先在新版本上跑完冒烟测试和长期 / 临时容器的真机验证。setup.sh 里有同样一对常量。
+CONTAINER_MIN_VERSION="1.0.0"
+CONTAINER_TESTED_VERSION="1.6.0"
 # Claude / Codex 状态:两种容器共用,与 Mac 本机 CLI 的 ~/.claude、~/.codex 分开。
 # 放在 Home 下:长期容器按原路径挂载整个 Home,临时容器单独挂载这两个目录。
 AIBOX_STATE_DIR="$HOME/.aibox"
@@ -372,6 +376,41 @@ aibox_file_mtime() {
     printf '%s' "$value"
 }
 
+# ---- Apple container 版本 ----
+# container --version 输出形如「container CLI version 1.6.0 (build: ...)」
+aibox_container_version() {
+    container --version 2>/dev/null | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p' | head -n 1
+}
+
+# aibox_version_lt A B:A 比 B 旧时返回 0(逐段比较数字,兼容 Bash 3.2)
+aibox_version_lt() {
+    local a="$1" b="$2" x y
+    while [[ -n "$a" || -n "$b" ]]; do
+        x="${a%%.*}"; y="${b%%.*}"
+        x="${x:-0}"; y="${y:-0}"
+        if (( 10#$x < 10#$y )); then return 0; fi
+        if (( 10#$x > 10#$y )); then return 1; fi
+        [[ "$a" == *.* ]] && a="${a#*.}" || a=""
+        [[ "$b" == *.* ]] && b="${b#*.}" || b=""
+    done
+    return 1
+}
+
+# 给 status 用的一行说明
+aibox_container_version_line() {
+    local ver
+    ver="$(aibox_container_version)"
+    if [[ -z "$ver" ]]; then
+        printf '版本未知(已验证 %s)\n' "$CONTAINER_TESTED_VERSION"
+    elif aibox_version_lt "$ver" "$CONTAINER_MIN_VERSION"; then
+        printf '%s,低于最低要求 %s,请升级(aibox setup 可引导)\n' "$ver" "$CONTAINER_MIN_VERSION"
+    elif aibox_version_lt "$CONTAINER_TESTED_VERSION" "$ver"; then
+        printf '%s(高于已验证的 %s,未经验证;遇到问题请反馈)\n' "$ver" "$CONTAINER_TESTED_VERSION"
+    else
+        printf '%s(已验证 %s)\n' "$ver" "$CONTAINER_TESTED_VERSION"
+    fi
+}
+
 # ---- 剪贴板图片桥接:状态自检(aibox status 与 aibox dev status 共用)----
 # 纯只读检查,不启动也不修改任何东西。沙箱侧的 xclip 垫片烧在镜像里、没有运行期状态,
 # 会出问题的只有宿主机这半截:装没装、还活着没、此刻剪贴板里有没有图。
@@ -634,7 +673,14 @@ aibox_migrate_copy_machine() {
             return 1
             ;;
     esac
-    container machine run --name "$DEV_MACHINE_NAME" cp -a "$1/." "$2/"
+    # tar 会跳过 Unix socket:它们是运行时端点,不能迁移到 macOS 共享目录,
+    # 应由 Claude / Codex 在下次启动时重新创建。保留普通文件、目录和软链接。
+    # 显式启用 pipefail,确保机内读取失败不会被宿主解包成功掩盖。
+    (
+        set -o pipefail
+        container machine run --name "$DEV_MACHINE_NAME" tar -cf - -C "$1" . \
+            | tar -xf - --no-same-owner -C "$2"
+    )
 }
 
 # 用法:aibox_migrate_legacy [explicit]
@@ -1170,6 +1216,7 @@ if [[ "${1:-}" == "status" ]]; then
     [[ $# -eq 1 ]] || { echo "用法: aibox status" >&2; exit 2; }
     status_rc=0
     echo "== ai-sandbox 状态 =="
+    echo "  container  : $(aibox_container_version_line)"
     # 服务:能否列容器 = 服务是否在跑(服务没起 container ls 会失败)
     if container ls >/dev/null 2>&1; then
         svc_up=1; echo "  服务       : 运行中"
