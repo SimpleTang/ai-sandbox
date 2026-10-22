@@ -8,6 +8,10 @@ mounted read-write at its original path, and software and system settings instal
 kept on a persistent system disk. `aibox tmp` instead creates a short-lived temporary container that
 mounts only the selected project and a few explicitly persisted directories.
 
+Changes and upgrade notes for each version are in [CHANGELOG.md](CHANGELOG.md) (Chinese, with an
+English summary per release); release archives are on the
+[Releases](https://github.com/SimpleTang/ai-sandbox/releases) page.
+
 This is an independent, unofficial project. It is not affiliated with, endorsed by, or supported
 by Apple, Anthropic, OpenAI, Eclipse Adoptium, the Apache Software Foundation, or the go-gost
 project. Product names and trademarks belong to their respective owners. You are responsible for
@@ -508,6 +512,7 @@ aibox tmp version                   # show the CLI versions pinned in the Docker
 # General
 aibox status
 aibox help                    # also -h / --help
+aibox --version               # aibox's own version (also -V)
 
 # Clipboard image bridge (host-side watcher; applies to both container types)
 aibox clip install

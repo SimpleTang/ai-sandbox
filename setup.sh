@@ -1004,13 +1004,18 @@ step_config() {
 # 旧版的 Claude / Codex 状态在仓库 creds/(临时容器)和长期容器机内(/home/<用户>/.claude)。
 # 具体检测和复制由 aibox migrate 完成;这里只判断要不要做,--check 时不为检查去启动长期容器。
 step_migrate() {
-    local legacy=""
+    local legacy="" entry
     step 6 "迁移旧版数据(登录状态与配置)"
     if [[ -f "$MIGRATED_MARK" ]]; then
         ok "已完成($(cat "$MIGRATED_MARK"))"
         return 0
     fi
-    [[ -n "$(ls -A "$SANDBOX_DIR/creds" 2>/dev/null | grep -vx '.DS_Store')" ]] && legacy="仓库 creds/"
+    for entry in "$SANDBOX_DIR"/creds/* "$SANDBOX_DIR"/creds/.[!.]*; do
+        if [[ -e "$entry" && "$(basename "$entry")" != ".DS_Store" ]]; then
+            legacy="仓库 creds/"
+            break
+        fi
+    done
     if container_found && service_running \
        && container machine list -q 2>/dev/null | grep -qxF "$DEV_MACHINE_NAME"; then
         legacy="${legacy:+${legacy}、}已有的长期容器"
@@ -1141,7 +1146,9 @@ finish() {
 }
 
 main() {
-    printf '%saibox 安装向导%s\n' "$C_BOLD" "$C_OFF"
+    local version
+    version="$(sed -n 's/^AIBOX_VERSION="\(.*\)"$/\1/p' "$AIBOX" 2>/dev/null | head -n 1)"
+    printf '%saibox 安装向导%s%s\n' "$C_BOLD" "${version:+ v$version}" "$C_OFF"
     if (( CHECK_ONLY )); then
         info "只检查,不做任何修改。"
     else

@@ -2,7 +2,10 @@ name: CI
 
 on:
   push:
+    # Tags are covered by the release workflow, which calls this one.
+    branches: ['**']
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -10,6 +13,8 @@ permissions:
 jobs:
   smoke:
     strategy:
+      # Report both platforms even when one fails.
+      fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}

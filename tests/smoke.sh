@@ -40,9 +40,24 @@ test -f "$ROOT/README.md"
 test -f "$ROOT/README.en.md"
 test -f "$ROOT/LICENSE"
 
+# Every release version needs a changelog entry; the release workflow publishes that section.
+aibox_version="$(sed -n 's/^AIBOX_VERSION="\(.*\)"$/\1/p' "$ROOT/ai-box")"
+[ -n "$aibox_version" ] || { echo "ai-box does not declare AIBOX_VERSION" >&2; exit 1; }
+grep -q "^## \[$aibox_version\]" "$ROOT/CHANGELOG.md" \
+    || { echo "CHANGELOG.md has no entry for $aibox_version" >&2; exit 1; }
+case "$("$ROOT/ai-box" --version)" in
+    "aibox $aibox_version"*) ;;
+    *) echo "ai-box --version does not report $aibox_version" >&2; exit 1 ;;
+esac
+
 # Exercise custom environment forwarding without requiring Apple container. Keep the
 # fixture self-contained so config, credentials, caches, and env-files never touch the checkout.
 TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/aibox-smoke.XXXXXX")"
+# macOS sets TMPDIR with a trailing slash, which leaves a // in every derived path, while the
+# launcher normalizes directories with cd && pwd. Normalize once so the paths compare equal.
+TMP_ROOT="$(cd "$TMP_ROOT" && pwd)"
+# Keep the machine wrapper away from the profile of whatever machine runs these tests.
+export AIBOX_DEV_PROFILE="$TMP_ROOT/no-machine-profile"
 cleanup() {
     rm -rf "$TMP_ROOT"
 }
@@ -241,7 +256,13 @@ cat > "$STUB_BIN/curl" <<'STUB'
 #!/bin/sh
 printf '{"name":"stub","version":"9.9.9"}\n'
 STUB
-chmod +x "$STUB_BIN/container" "$STUB_BIN/curl" "$FIXTURE/ai-box" "$FIXTURE/entrypoint.sh"
+# The clipboard bridge status asks launchd whether the watcher is loaded. Answer "not
+# loaded" so the real host's watcher (if any) never leaks into the results.
+cat > "$STUB_BIN/launchctl" <<'STUB'
+#!/bin/sh
+[ "${1:-}" != "print" ]
+STUB
+chmod +x "$STUB_BIN/container" "$STUB_BIN/curl" "$STUB_BIN/launchctl" "$FIXTURE/ai-box" "$FIXTURE/entrypoint.sh"
 
 fail() {
     echo "smoke test failed: $1" >&2
@@ -323,6 +344,8 @@ run_fixture_command() (
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
     export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION
+    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
+    unset FIXED_SOCKS_HOST FIXED_SOCKS_PORT FIXED_SOCKS_USER FIXED_SOCKS_PASS
     "$FIXTURE/ai-box" "$@"
 )
 
@@ -877,6 +900,9 @@ assert_file_contains "$TMP_ROOT/dev-status.output" '1.6.0(已验证 1.6.0)' \
     "status did not report the Apple container version against the verified one"
 assert_file_contains "$TMP_ROOT/dev-status.output" '== 长期容器 ==' \
     "dev status is missing its readable heading"
+# Field extraction uses macOS plutil, which Linux runners do not have; the launcher only
+# runs on macOS anyway.
+if [ "$(uname -s)" = Darwin ]; then
 assert_file_contains "$TMP_ROOT/dev-status.output" '运行状态   : 运行中' \
     "dev status did not translate the machine state"
 assert_file_contains "$TMP_ROOT/dev-status.output" '镜像       : ai-sandbox-dev:latest' \
@@ -897,6 +923,7 @@ assert_file_contains "$TMP_ROOT/dev-status.output" '开发用户   : developer�
     "dev status did not format the provisioned user"
 assert_file_contains "$TMP_ROOT/dev-status.output" '启动时间   : 2026-08-16T15:22:50Z' \
     "dev status did not show the last start time"
+fi
 assert_file_omits "$TMP_ROOT/dev-status.output" '[{"cpus"' \
     "dev status leaked raw inspect JSON"
 

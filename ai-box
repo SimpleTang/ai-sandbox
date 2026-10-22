@@ -32,6 +32,7 @@
 #   ai-box status               # 一屏自检:服务 / 镜像 / 长期容器 / 临时容器
 #   ai-box clip ...             # 剪贴板贴图(两种容器都生效)
 #   ai-box help                 # 命令速查(也认 -h / --help)
+#   ai-box --version            # 显示 aibox 自身的版本(也认 -V)
 #
 # 带 cc/codex 时,工具退出后留在容器 shell;临时容器再 exit 才销毁。
 #
@@ -46,6 +47,9 @@
 #   (旧的 FIXED_SOCKS_* 环境变量仍作 socks5 代理兜底,兼容老配置)
 # 进容器后直接敲 `claude` 或 `codex`。
 set -euo pipefail
+
+# aibox 自身的版本。发版时与 CHANGELOG.md 的条目和 git tag(v<版本>)保持一致。
+AIBOX_VERSION="0.1.0"
 
 IMAGE="ai-sandbox:latest"
 DEV_IMAGE="ai-sandbox-dev:latest"
@@ -122,6 +126,7 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
   aibox clip status            查看桥接状态;uninstall 卸载,restart 重启监听
   aibox clip doctor            贴不上图时的诊断(在 macOS 前台重跑一遍监听的动作)
   aibox help                   显示本帮助(也认 -h / --help)
+  aibox --version              显示 aibox 自身的版本(也认 -V;容器内 CLI 的版本用 aibox version)
 
 说明:
   · 长期容器不绑定单个项目;它隔离系统环境,但不隔离宿主 Home 数据,机内进程可读写整个 Home。
@@ -136,6 +141,13 @@ HELP
 }
 if [[ "${1:-}" == "help" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     aibox_help
+    exit 0
+fi
+
+# ---- --version:aibox 自身的版本;在 git 克隆里同时显示所在提交 ----
+if [[ "${1:-}" == "--version" || "${1:-}" == "-V" ]]; then
+    aibox_git_rev="$(git -C "$SANDBOX_DIR" describe --tags --always --dirty 2>/dev/null || true)"
+    echo "aibox ${AIBOX_VERSION}${aibox_git_rev:+ ($aibox_git_rev)}"
     exit 0
 fi
 
@@ -1216,6 +1228,7 @@ if [[ "${1:-}" == "status" ]]; then
     [[ $# -eq 1 ]] || { echo "用法: aibox status" >&2; exit 2; }
     status_rc=0
     echo "== ai-sandbox 状态 =="
+    echo "  aibox      : $AIBOX_VERSION"
     echo "  container  : $(aibox_container_version_line)"
     # 服务:能否列容器 = 服务是否在跑(服务没起 container ls 会失败)
     if container ls >/dev/null 2>&1; then

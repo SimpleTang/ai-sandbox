@@ -63,23 +63,27 @@ esac
 if [[ -n "${AIBOX_DEV_EXEC:-}" ]]; then
     eval "set -- $AIBOX_DEV_EXEC"
 fi
-unset AIBOX_PROXY AIBOX_DEV_CUSTOM_NAMES AIBOX_DEV_LAUNCH AIBOX_DEV_EXEC
+# The machine profile; AIBOX_DEV_PROFILE only exists so tests can isolate this wrapper
+# from the profile of whatever machine runs them. The launcher never sets it, and
+# AIBOX_ENV_VARS cannot, because the AIBOX_ prefix is reserved there.
+aibox_profile="${AIBOX_DEV_PROFILE:-/etc/profile.d/aibox-dev.sh}"
+unset AIBOX_PROXY AIBOX_DEV_CUSTOM_NAMES AIBOX_DEV_LAUNCH AIBOX_DEV_EXEC AIBOX_DEV_PROFILE
 unset -f aibox_custom_has aibox_export_default
 export PATH="$AIBOX_DEV_FINAL_PATH"
 unset AIBOX_DEV_FINAL_PATH
 
 if [[ $# -gt 0 ]]; then
     # Exec sessions do not start a login shell, so load the machine profile here.
-    # shellcheck disable=SC1091
-    [[ ! -r /etc/profile.d/aibox-dev.sh ]] || source /etc/profile.d/aibox-dev.sh
+    # shellcheck disable=SC1090
+    [[ ! -r "$aibox_profile" ]] || source "$aibox_profile"
     exec "$@"
 fi
 
 if [[ -n "$aibox_launch" ]]; then
     # Login shells load the machine profile; this process is not one, so load it here.
-    # shellcheck disable=SC1091
-    [[ ! -r /etc/profile.d/aibox-dev.sh ]] || source /etc/profile.d/aibox-dev.sh
+    # shellcheck disable=SC1090
+    [[ ! -r "$aibox_profile" ]] || source "$aibox_profile"
     "$aibox_launch" || true
 fi
-unset aibox_launch
+unset aibox_launch aibox_profile
 exec /bin/bash -l

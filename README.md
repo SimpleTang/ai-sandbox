@@ -4,6 +4,8 @@
 
 在 Apple silicon Mac 上通过 [Apple container](https://github.com/apple/container) 运行 Claude Code 和 Codex CLI。默认的 `aibox` 进入一台基于 `container machine` 的长期容器：宿主 Home 按原路径读写挂载，机内装的软件和系统配置保存在长期保留的系统盘上；`aibox tmp` 则每次创建一个只挂载当前项目及明确持久化目录、用完即删的临时容器。
 
+各版本的变化与升级须知见 [CHANGELOG.md](CHANGELOG.md)，发布包见 [Releases](https://github.com/SimpleTang/ai-sandbox/releases)。
+
 本项目是社区项目，与 Apple、Anthropic 或 OpenAI 无隶属或背书关系。Claude、Claude Code、OpenAI 和 Codex 等名称及商标归其各自权利人所有。使用相关服务时，请遵守对应条款和当地法律。
 
 ## 功能
@@ -352,6 +354,7 @@ aibox tmp version                     # 显示 Dockerfile 中锁定的 CLI 版�
 # 通用
 aibox status                          # 服务、镜像、版本锁定、登录状态目录、剪贴板桥接、长期容器详情和运行中的临时容器
 aibox help                            # 命令帮助（也认 -h / --help）
+aibox --version                       # aibox 自身的版本（也认 -V）
 
 # 剪贴板贴图（宿主机侧常驻监听，两种容器都生效）
 aibox clip install                    # 启用
