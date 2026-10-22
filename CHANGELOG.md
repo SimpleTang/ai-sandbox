@@ -19,7 +19,7 @@ English summary: aibox can now be installed with Homebrew (`brew install simplet
 ### 新增
 
 - Homebrew tap：`simpletang/tap`。配方不声明 Apple container 依赖，由 `aibox setup` 引导安装已验证的版本，避免和已用 `.pkg` 安装的 container 冲突。
-- 发布工作流在创建 Release 后自动更新 tap 里的配方（需要仓库密钥 `HOMEBREW_TAP_TOKEN`；未配置时跳过，不影响发布）。
+- 发布工作流在创建 Release 后自动更新 tap 里的配方：用只对 tap 仓库有写权限的 deploy key 推送（私钥存为仓库密钥 `HOMEBREW_TAP_DEPLOY_KEY`；未配置时跳过，不影响发布）。
 - `aibox --version` 会标出 Homebrew 安装。
 
 ### 变更

@@ -58,25 +58,35 @@ jobs:
             --title "aibox $GITHUB_REF_NAME" --notes-file release-notes.md
 
   homebrew:
-    # Point the tap's formula at the new release. Needs a HOMEBREW_TAP_TOKEN secret that can
-    # push to <owner>/homebrew-tap; without it the release still succeeds and this step skips.
+    # Point the tap's formula at the new release. Pushes with a deploy key that has write access
+    # to <owner>/homebrew-tap only (secret HOMEBREW_TAP_DEPLOY_KEY, the private key). Without the
+    # secret the release still succeeds and this step skips. Prereleases leave the tap alone.
     needs: release
     if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     steps:
       - name: Update the Homebrew tap
         env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           TAP_REPO: ${{ github.repository_owner }}/homebrew-tap
         run: |
-          if [ -z "$TAP_TOKEN" ]; then
-            echo "::warning::HOMEBREW_TAP_TOKEN is not set; skipping the Homebrew tap update"
+          if [ -z "$TAP_DEPLOY_KEY" ]; then
+            echo "::warning::HOMEBREW_TAP_DEPLOY_KEY is not set; skipping the Homebrew tap update"
             exit 0
           fi
           version="${GITHUB_REF_NAME#v}"
           url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
           sha="$(curl -fsSL --retry 3 "$url" | sha256sum | cut -d' ' -f1)"
-          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" tap
+
+          key="$RUNNER_TEMP/tap-deploy-key"
+          known_hosts="$RUNNER_TEMP/known_hosts"
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          # GitHub's published host key (https://api.github.com/meta), pinned instead of trusted on first use
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes"
+
+          git clone --depth 1 "git@github.com:${TAP_REPO}.git" tap
           cd tap
           sed -i -E \
             -e "s|^  url \".*\"|  url \"${url}\"|" \
