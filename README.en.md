@@ -34,9 +34,9 @@ complying with each service's terms and with applicable law.
   egress firewall that blocks bypass traffic.
 - Runtime timezone and locale selection.
 - `ai-ipcheck` is installed by default, providing the `ipcheck` network-diagnostics command.
-- Optional JDK 8 and Maven from local archives; an empty `~/.aibox/third_party/` directory still
-  builds the core AI CLI image.
-- Configuration, login state, optional assets, and caches all live in `~/.aibox/`; the program
+- A general-purpose AI CLI sandbox: no JDK, Maven, or other language toolchains are baked in;
+  install what you need inside the persistent container, whose system disk is kept.
+- Configuration, login state, and optional assets all live in `~/.aibox/`; the program
   directory (the git clone) is treated as read-only and replaceable.
 - Pinned Claude Code and Codex CLI versions with interactive update commands.
 - `aibox clip install` enables a clipboard image bridge so Claude Code inside the sandbox can
@@ -50,18 +50,18 @@ complying with each service's terms and with applicable law.
   Version 1.6.0 is the currently verified version and 1.0.0 is the minimum. This project does not
   use Docker Desktop or the `docker` command.
 - Bash 3.2 or later for `ai-box`; zsh and Bash completion are supported.
-- Enough memory and disk for the images, machine disk, caches, and projects. Temporary containers
-  and the persistent container request `8192M` by default through `MEMORY` and `DEV_MEMORY`.
-  `DEV_MEMORY` is only used when the persistent container is first created; change it later with
-  `aibox set memory=...`.
+- Enough memory and disk for the images, machine disk, and projects. Both container types request
+  `8192M` of memory by default and leave the CPU count to Apple container (4 for temporary
+  containers, half the host's cores for the persistent container). Change them with
+  `AIBOX_MEMORY` / `AIBOX_CPUS` in `aibox.conf` (see [Configuration](#configuration)).
 
 `aibox` runs only on macOS and only as an ordinary user. In Linux (including inside the persistent
 container) or under `sudo`/root it exits with an error, because `$HOME` there is not the Mac user's
 home and reading or writing `~/.aibox` would put user data in the wrong place. `aibox help` and
 `aibox --version` work everywhere.
 
-The image is Linux/arm64. Any optional binary or archive placed in `~/.aibox/third_party/` must
-match that platform.
+The image is Linux/arm64. A `gost` binary placed in `~/.aibox/third_party/` must match that
+platform.
 
 ## Install
 
@@ -86,9 +86,12 @@ cd ai-sandbox
 ```
 
 The wizard checks and completes the steps below. Each step inspects the current state first and
-skips what is already done, so it is safe to interrupt and rerun:
+skips what is already done, so it is safe to interrupt and rerun. Choices use the arrow keys and
+Enter (yes/no questions also take y or n); time zone, language, memory and CPU list common values,
+and the last item, 手动输入… (manual entry), accepts anything else:
 
-1. Check the Mac: Apple silicon and macOS 26.
+1. Check the Mac: Apple silicon and macOS 26, and show the host's memory and CPU count. With less
+   than 16G of memory it suggests a smaller container memory in step 5.
 2. Install Apple container: optionally download the official installer for the verified version
    (currently 1.6.0), verify Apple's signature, and open the system installer, or just open the
    download page. An existing installation is version-checked: below the minimum it asks you to
@@ -100,17 +103,22 @@ skips what is already done, so it is safe to interrupt and rerun:
    Then enable completion (in `~/.zshrc`, or `~/.bash_profile` for bash; Homebrew installs use the
    version-independent `opt/aibox` path). Existing completion lines pointing elsewhere are
    commented out, not deleted.
-5. Create `~/.aibox/aibox.conf` (mode `600`): proxy, timezone, locale, and authentication (account
-   login inside the container, or API keys). For a proxy it validates the URL, replaces addresses
+5. Create `~/.aibox/aibox.conf` (mode `600`): proxy, timezone, locale, resources (memory and CPUs,
+   capped at what the Mac has), and authentication (account login inside the container, or API
+   keys). For a proxy it validates the URL, replaces addresses
    such as `127.0.0.1`, which a container cannot reach, with the host's address on the container
    network, can download gost and verify the SHA-256 recorded below, and can test whether the proxy
    reaches the Claude API. An existing configuration is kept by default; changing it backs up the
-   old file and preserves `AIBOX_ENV_VARS` entries unrelated to authentication.
-6. Migrate old data: if the old release left login state and settings behind, choose the
-   persistent container's, the temporary container's, or a merge (see Authentication). An
-   `aibox.conf`, `third_party/` assets, and a Gradle cache left in the program directory by an
-   older release are moved to `~/.aibox/` automatically right after step 1 (see
-   [User Data Directory](#user-data-directory)).
+   old file and preserves `AIBOX_ENV_VARS` entries unrelated to authentication. When the resources
+   change and the persistent container already exists, it offers to apply them with `aibox set`
+   (effective after `aibox restart`).
+6. Migrate and clean up old data: if the old release left login state and settings behind, choose
+   the persistent container's, the temporary container's, or a merge (see Authentication). An
+   `aibox.conf` and `third_party/gost` left in the program directory by an older release are moved
+   to `~/.aibox/` automatically right after step 1 (see
+   [User Data Directory](#user-data-directory)). Old `jdk8.tar.gz` / `maven.tar.gz` archives and
+   the Gradle cache (`~/.aibox/cache/gradle` or `cache/gradle` in the program directory) are no
+   longer used; the wizard lists them with their sizes and offers to delete them (default: keep).
 7. Build images: both `ai-sandbox:latest` (the base image, used by temporary containers) and
    `ai-sandbox-dev:latest` (the persistent-container image) are required; if either is missing,
    the wizard runs `aibox build`, which builds them in that order.
@@ -235,7 +243,7 @@ Choosing between the two:
 - **Temporary container** (`aibox tmp`): for code you do not fully trust. Only the project and a
   few explicitly persisted directories are mounted, and proxy mode adds a fail-closed egress
   firewall. With `cc` or `codex`, you stay in the container shell when the tool exits; run `exit`
-  again to remove the container. Changes made under the mounted project, login state, and caches
+  again to remove the container. Changes made under the mounted project and login state
   remain on the host.
 
 To use API keys, other custom environment variables, or runtime settings, run `aibox setup` to
@@ -255,16 +263,15 @@ into issues or logs.
 
 ## User Data Directory
 
-The program directory (the git clone, or a Homebrew installation in the future) holds only program
-files and is treated as read-only and replaceable. Configuration, login state, optional assets, and
-caches live in the host's `~/.aibox/` (mode `700`):
+The program directory (the git clone or a Homebrew installation) holds only program files and is
+treated as read-only and replaceable. Configuration, login state, and optional assets live in the
+host's `~/.aibox/` (mode `700`):
 
 | Path | Contents |
 | --- | --- |
 | `claude/`, `codex/` | Claude / Codex login state and settings, shared by both container types (see Authentication) |
 | `aibox.conf` | Runtime configuration, written by `aibox setup` with mode `600` |
-| `third_party/` | Optional `gost`, `jdk8.tar.gz`, `maven.tar.gz` (see [Optional `third_party/` Components](#optional-third_party-components)) |
-| `cache/gradle/` | Gradle cache for temporary containers |
+| `third_party/` | Optional `gost` (see [Optional `third_party/` Components](#optional-third_party-components)) |
 | `versions.env` | CLI versions confirmed by `aibox tmp update` (see [Updates and Rebuilds](#updates-and-rebuilds)) |
 | `machine/` | Helper scripts staged before each persistent-container start; maintained by the launcher |
 | `clipboard/` | Copy of the clipboard watcher made by `aibox clip install` |
@@ -277,12 +284,11 @@ and `setup --check` do not). Files already present at the new location are never
 - `<program dir>/aibox.conf` moves to `~/.aibox/aibox.conf`, and a symlink to the new location is
   left behind, so editing the old path still works. If both exist with different contents, the old
   file is no longer read and every run prints a notice; delete it once you no longer need it.
-- `gost`, `jdk8.tar.gz`, and `maven.tar.gz` in `<program dir>/third_party/` move to
-  `~/.aibox/third_party/`.
-- `<program dir>/cache/gradle` moves to `~/.aibox/cache/gradle`. While temporary containers are
-  running it is left in place and moved on a later run.
-- If a third_party file or the Gradle cache exists in both places, the copy in `~/.aibox` is the
-  one in use; the old one is ignored and each run prints a notice until you delete it.
+- `<program dir>/third_party/gost` moves to `~/.aibox/third_party/gost`. If both exist, the copy
+  in `~/.aibox` is the one in use; the old one is ignored and each run prints a notice until you
+  delete it.
+- Old `jdk8.tar.gz` / `maven.tar.gz` archives and the Gradle cache are no longer moved;
+  `aibox setup` offers to delete them.
 - A `Dockerfile` edited by the old `aibox tmp update`: if the only local changes to the git
   clone's `Dockerfile` are the `ARG CLAUDE_CODE_VERSION=` and `ARG CODEX_VERSION=` lines, those
   versions are recorded in `~/.aibox/versions.env` and the `Dockerfile` is restored with git, so
@@ -296,6 +302,8 @@ All runtime settings are optional and apply to both container types:
 AIBOX_PROXY="" # Direct connection, or http(s):// / socks5(h):// URL
 AIBOX_TZ=""    # Follow the host, or an IANA name such as Asia/Shanghai
 AIBOX_LANG=""  # Follow the host, or a generated locale such as en_US.UTF-8
+AIBOX_MEMORY="" # Container memory such as 16G; empty means 8192M
+AIBOX_CPUS=""   # Container CPU count; empty leaves it to Apple container
 AIBOX_ENV_VARS=( # Custom environment variables passed into the container
   'EXAMPLE_NAME=value with spaces'
 )
@@ -305,7 +313,7 @@ AIBOX_ENV_VARS=( # Custom environment variables passed into the container
 run arbitrary commands with your user permissions. Use only a configuration you created or fully
 reviewed. Keep proxy passwords and other secrets out of examples, issues, and logs.
 
-For each of the three scalar settings, only a **non-empty** exported environment variable overrides
+For each scalar setting, only a **non-empty** exported environment variable overrides
 a non-empty file value. An empty environment variable cannot clear a non-empty value in
 `aibox.conf`.
 
@@ -318,10 +326,27 @@ The exact precedence is:
   image default (`UTC`).
 - `AIBOX_LANG`: non-empty environment value, non-empty file value, non-empty host `LANG`, then the
   image default (`C.UTF-8`).
+- `AIBOX_MEMORY`: non-empty environment value, non-empty file value, then `8192M`.
+- `AIBOX_CPUS`: non-empty environment value, non-empty file value, then Apple container's default
+  (4 for temporary containers, half the host's cores for the persistent container).
 
 For a one-off override, use a non-empty value such as `AIBOX_TZ=UTC aibox`. A requested locale must
 already be listed in `LOCALE_GEN` in the Dockerfile; otherwise the container falls back to
 `C.UTF-8` and prints a warning.
+
+When the resource settings take effect:
+
+- Temporary containers use `AIBOX_MEMORY` / `AIBOX_CPUS` on every start; `AIBOX_MEMORY=16G aibox
+  tmp` affects only that run.
+- The persistent container uses them only when it is first created. After that its resources are
+  part of the machine's own configuration: change them with `aibox set memory=16G cpus=6`, then
+  `aibox restart`. `aibox setup` offers to do this when you change the resources there, and
+  `aibox status` shows both the configured values and the machine's actual ones.
+- Memory needs an `M` or `G` suffix (`8G`, `4096M`) and the CPU count must be a positive integer;
+  `aibox` refuses to start a container when either is malformed. macOS allocates VM memory on
+  demand, so a larger value does not reserve host memory up front.
+- Inside an Apple container VM, `nproc` reports one more CPU than requested (`--cpus 2` shows 3);
+  that is Apple container's own behavior.
 
 `AIBOX_ENV_VARS` is read only from `aibox.conf`. It is a Bash array declared in that file, and each
 item is one complete `NAME=value` entry:
@@ -358,43 +383,35 @@ required variable explicitly.
 
 ## Optional `third_party/` Components
 
-Local third-party assets are not part of this repository: they can be large, and their
-redistribution terms and preferred download routes differ. Put them in `~/.aibox/third_party/`
-(create it if it is absent) and add only the components you need:
+Local third-party assets are not part of this repository. The build recognizes a single one in
+`~/.aibox/third_party/` (create it if it is absent); `aibox setup` can download and verify it for
+you. The `jdk8.tar.gz` and `maven.tar.gz` archives supported by older releases are no longer
+installed.
 
 | Exact filename | Build result | Verified version | Upstream and license |
 | --- | --- | --- | --- |
 | `gost` | Installs the Linux/arm64 proxy bridge. Required only when `AIBOX_PROXY` is non-empty. | gost 3.2.6, Linux ARM64 | [go-gost releases](https://github.com/go-gost/gost/releases), MIT |
-| `jdk8.tar.gz` | Extracts a Linux/arm64 JDK into `/opt/java/jdk8` and enables `java`/`javac`. | Eclipse Temurin 8u492-b09, Linux AArch64 JDK | [Eclipse Temurin 8](https://adoptium.net/temurin/releases/?version=8), GPLv2 with Classpath Exception plus bundled third-party notices |
-| `maven.tar.gz` | Extracts Maven into `/opt/maven` and enables `mvn`. It can be installed independently, but cannot run without a compatible JDK. | Apache Maven 3.9.16 binary tarball | [Apache Maven downloads](https://maven.apache.org/download.cgi), Apache License 2.0 |
 
-SHA-256 hashes of the assets used for the verified setup above:
+SHA-256 of the verified binary:
 
 ```text
 343c3e003996ca0437b9cc47dd1500cd0475ba09f5a5f17e50851854e06a1ca7  gost
-3c2253b986909c20f79d6de7a0cb957f89c243df57615897836046e24d2e5257  jdk8.tar.gz
-80ffca22aed9e8b9713a232f3394fd81d7f20322df75efdb2b047dbd3e3a23bb  maven.tar.gz
 ```
 
-The filenames are exact, each component is detected independently, and unknown files are ignored.
-With none of them present (or no `~/.aibox/third_party/` at all), `aibox build` produces the core
+The filename is exact and unknown files are ignored. Without it (or no `~/.aibox/third_party/` at all), `aibox build` produces the core
 image with Claude Code, Codex CLI, and the standard shell tools. If a proxy is configured without
 gost, container startup fails with an actionable error instead of silently using a direct
 connection.
 
-Download assets from their upstream projects, verify their published checksums or signatures, and
-review their licenses before use. For each build, `ai-box` assembles a temporary build context:
-program files are copied from the program directory according to the `.dockerignore` allowlist,
-and `third_party/` receives only these three files from `~/.aibox/third_party/` (cloned with
-`cp -c` on APFS when possible, so a large JDK costs no extra time or space). The temporary
-directory is removed afterwards, so nothing else from the program directory or `~/.aibox`
-(configuration, login state, caches) enters the build. Local assets avoid downloading those
-particular components during the build; the base image, Debian packages, Python package, and npm
-CLIs can still require network access.
+When adding it by hand, download it from the upstream project, verify the published checksum, and
+review its license. For each build, `ai-box` assembles a temporary build context: program files are
+copied from the program directory according to the `.dockerignore` allowlist, and `third_party/`
+receives only `~/.aibox/third_party/gost`. The temporary directory is removed afterwards, so
+nothing else from the program directory or `~/.aibox` (configuration, login state) enters the
+build. The base image, Debian packages, Python package, and npm CLIs still require network access.
 
-Changing any file in `~/.aibox/third_party/` requires `aibox build`. The one exception is gost for
-an existing persistent container: `~/.aibox/third_party/gost` is synced into the machine on every
-start, wherever the program directory is. Temporary containers still need the rebuilt image.
+An existing persistent container picks up `~/.aibox/third_party/gost` on every start, wherever the
+program directory is. Temporary containers need `aibox build` to use a new or replaced gost.
 
 ## Network and Proxy Behavior
 
@@ -506,8 +523,6 @@ the container can access every path explicitly mounted by `ai-box`:
 | --- | --- | --- |
 | Selected project | `/workspace/<project-name>` | Project files; edits immediately affect the host |
 | `~/.aibox/claude` and `~/.aibox/codex` | `/home/node/.claude` and `/home/node/.codex` | Persistent authentication and tool state, shared with the persistent container |
-| `~/.m2/repository` | `/home/node/.m2/repository` | Maven artifacts shared with the host |
-| `~/.aibox/cache/gradle` | `/home/node/.gradle` | Linux-specific Gradle cache |
 | Launch-time snapshot of `<program dir>/entrypoint.sh` (in a host temporary directory) | `/usr/local/bin/entrypoint.sh` | Read-only runtime entrypoint override |
 | `~/.clipboard-bridge` (only when the clipboard bridge is enabled) | `/run/aibox/clipboard-bridge` | Read-only clipboard images |
 
@@ -515,7 +530,7 @@ User commands run as `node`. Direct-mode containers retain passwordless `sudo`; 
 remove sudo and capabilities after firewall initialization so container code cannot disable the
 kill switch. Container code can
 modify the mounted project and persistent state, read values configured through `AIBOX_ENV_VARS`,
-access the network, and potentially alter mounted caches. Those values are not placed in the
+and access the network. Those values are not placed in the
 `container` CLI arguments or exported into the host launcher environment. They are written briefly
 to a mode-`0600` host-side temporary env file, mounted read-only, imported only after privilege
 drop, removed when `ai-box` exits, and visible as environment variables to user processes. Review
@@ -556,7 +571,7 @@ aibox restart                 # restart and refresh the proxy service
 aibox exec <cmd> [args]       # run a command as the ordinary machine user
 aibox update [cc|codex]       # check for newer CLIs inside the machine; update after confirmation
 aibox version [cc|codex]      # show versions actually installed in the machine
-aibox set memory=8G cpus=4    # change resources; takes effect after restart
+aibox set memory=8G cpus=4    # change an existing machine's resources; takes effect after restart
 aibox stop                    # keep the persistent system disk
 aibox logs [-f]
 aibox delete                  # confirm, then delete the persistent container and its system disk; alias: rm
@@ -661,25 +676,21 @@ The watcher mirrors **images only, never clipboard text**, so passwords copied f
 manager are never written to disk. See [`clipboard-bridge/README.md`](clipboard-bridge/README.md)
 for the mechanism, architecture diagram, and troubleshooting.
 
-## Optional Java Support
+## Development Toolchains
 
-Add `jdk8.tar.gz`, `maven.tar.gz`, or both as described above and rebuild. A Maven command requires
-a JDK, and a Gradle wrapper also requires a compatible JDK:
+The image includes Claude Code, Codex, and the basics they need (Node.js, Python, git, and common
+shell tools). It does not include JDK, Maven, Gradle, or other language toolchains. When you need
+one:
 
-```bash
-mvn clean package
-./gradlew build
-```
+- Persistent container: its system disk is kept, so install it inside the machine, for example
+  `sudo apt-get install openjdk-17-jdk maven`, and it stays available. `aibox delete` removes the
+  installed software together with the machine.
+- Temporary containers are deleted on exit, so anything installed there is lost; use the
+  persistent container for projects that need a fixed toolchain.
 
-In temporary containers, Maven artifacts use the host's `~/.m2/repository`, and Gradle uses
-`~/.aibox/cache/gradle` because a single Gradle home should not be shared between macOS and Linux.
-Avoid simultaneous host and container Maven builds that write the same artifact cache. The
-persistent container has no such dedicated mounts; Maven and Gradle use the machine user's own
-directories on the system disk.
-
-Maven and Gradle do not consistently honor `HTTP_PROXY`, so the temporary container's entrypoint
-creates their proxy settings when a proxy is active. Direct Java connections are rejected by the
-proxy-mode firewall; add JVM proxy properties explicitly when needed, for example:
+In proxy mode the temporary container's firewall allows only connections through the local proxy.
+Programs that honor `HTTP_PROXY` and friends work as is; tools that do not, such as Java, Maven,
+and Gradle, need the proxy (`127.0.0.1:8080`) configured explicitly, for example:
 
 ```bash
 java -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8080 \
@@ -733,8 +744,7 @@ default shipped with a later aibox release takes over automatically.
 Rebuild and sync rules:
 
 - Run `aibox build` (base image, then persistent-container image) after changing `Dockerfile`,
-  `network-lockdown.sh`, `LOCALE_GEN`, a pinned CLI version, or a recognized asset in
-  `~/.aibox/third_party/`.
+  `network-lockdown.sh`, `LOCALE_GEN`, a pinned CLI version, or `~/.aibox/third_party/gost`.
   If you only use temporary containers, `aibox tmp build` is enough.
 - `aibox build` does not replace an existing persistent container; it keeps its own system disk.
   To move it to a new image as a whole (for example after changing `Dockerfile.dev`), back up any
@@ -774,12 +784,14 @@ already-built image, so they can differ from that image until a successful rebui
 | A launch after upgrading asks how to migrate old data | Expected, once: choose the persistent container's state, the temporary container's, or a merge. To decide later, postpone and run `aibox migrate` afterwards. |
 | Some settings or sessions are missing after migrating | Sessions still running during the migration kept writing to the old location. Recover from the backups in the machine's `~/.claude.pre-aibox-<time>/` or `~/.aibox/legacy/`. |
 | The first `aibox` after a Mac restart reports `Failed to connect to bus` | Update the host-side `ai-box`; it waits for the machine's systemd manager before applying system settings, without requiring deletion of the persistent container. |
-| Build dependency downloads fail | The build still needs access to the base-image registry, Debian/PyPI, and npm sources. Fix that path or retry; local `~/.aibox/third_party/` assets only replace their own downloads. |
+| Build dependency downloads fail | The build still needs access to the base-image registry, Debian/PyPI, and npm sources. Fix that path or retry. |
 | A configured proxy fails immediately | Confirm that `~/.aibox/third_party/gost` is Linux/arm64 and executable. Temporary containers need it present when the image is built (rebuild, then check `aibox tmp logs <target>`); the persistent container picks it up on the next start. |
 | Lockdown components are missing or firewall initialization fails | Run a full `aibox build`. If it still fails, confirm Apple container accepted the launcher's `CAP_NET_ADMIN` capability. |
 | A SOCKS proxy cannot resolve names | Try a `socks5h://` URL so the proxy resolves hostnames. |
 | A locale falls back to `C.UTF-8` | Add it to `LOCALE_GEN` in the Dockerfile and rebuild. |
-| A long CLI session becomes slow or is killed | Check host memory pressure; containers request `8192M`. Adjust `MEMORY` for temporary containers, or `aibox set memory=...` followed by `aibox restart` for the persistent container. Compact or restart long Claude sessions when appropriate. |
+| A long CLI session becomes slow or is killed | Check host memory pressure; containers request `8192M` by default. Raise `AIBOX_MEMORY` in `aibox.conf` for temporary containers, or run `aibox set memory=...` followed by `aibox restart` for the persistent container. Compact or restart long Claude sessions when appropriate. |
+| `aibox` says `AIBOX_MEMORY` or `AIBOX_CPUS` is malformed | Write memory with a unit (`8G`, `4096M`) and the CPU count as a positive integer, or rerun `aibox setup` to regenerate the file. |
+| `java` / `mvn` disappeared after upgrading | The image no longer includes a JDK or Maven; see [Development Toolchains](#development-toolchains). In an existing persistent container the `/opt/java` and `/opt/maven` from the old image are still there but no longer added to `PATH`. |
 | Two projects share Claude state | Give their mounted directories different basenames. |
 | Apple container's builder is stuck | Follow Apple container diagnostics; recreating the builder may discard builder state and should be a deliberate last resort. |
 | The mounted project directory is empty inside a temporary container | Apple container's single-file mounts also share the file's parent directory; when that parent is itself the source of another mount (e.g. `entrypoint.sh` while mounting the sandbox repo as the project), that mount silently comes up empty. `ai-box` avoids this by mounting a launch-time snapshot of `entrypoint.sh`; if it still happens, update the host-side `ai-box` or restart the container service. |
@@ -822,20 +834,17 @@ With Homebrew, replace removing the symlink and the clone below with `brew unins
    from `$HOME/.local/bin` and remove the completion line from your shell startup file.
 3. Delete the `ai-sandbox:latest` and `ai-sandbox-dev:latest` images with Apple container's
    image-management command if they are no longer needed.
-4. Delete the clone. Configuration, login state, `third_party/` assets, and the Gradle cache live
-   in `~/.aibox`, outside the clone, and are not removed with it.
+4. Delete the clone. Configuration, login state, and `third_party/` assets live in `~/.aibox`,
+   outside the clone, and are not removed with it.
 5. For a full removal, back up what you need from `~/.aibox` (for example `aibox.conf` and login
    state), then delete it with `rm -rf ~/.aibox`. It contains authentication secrets, so delete it
    deliberately.
-
-The shared host Maven repository at `~/.m2/repository` is not owned exclusively by this project and
-is not removed as part of uninstalling it.
 
 ## License and Upstream Software
 
 The original scripts and documentation in this repository are licensed under the [MIT License](LICENSE).
 That license does not relicense Apple container, the base Node/Debian image, Claude Code, Codex CLI,
-`ai-ipcheck`, `gost`, Eclipse Temurin, Apache Maven, or their dependencies. Their own licenses and
+`ai-ipcheck`, `gost`, or their dependencies. Their own licenses and
 terms continue to apply:
 
 - [Apple container](https://github.com/apple/container)
@@ -843,7 +852,7 @@ terms continue to apply:
 - [Claude Code documentation](https://docs.anthropic.com/en/docs/claude-code/overview)
 - [OpenAI Codex CLI](https://github.com/openai/codex)
 - [`ai-ipcheck`](https://github.com/stormzhang/ipcheck)
-- [`gost`](https://github.com/go-gost/gost), Eclipse Temurin, and Apache Maven as listed in the optional-components table
+- [`gost`](https://github.com/go-gost/gost)
 
 Review the version pins in the Dockerfile and the license or notice files included with every binary
 you choose to add to `~/.aibox/third_party/`.

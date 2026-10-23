@@ -13,12 +13,3 @@ fi
 export CLAUDE_CONFIG_DIR="$aibox_state_dir/claude"
 export CODEX_HOME="$aibox_state_dir/codex"
 unset aibox_state_dir
-
-if [ -x /opt/java/jdk8/bin/java ]; then
-    export JAVA_HOME=/opt/java/jdk8
-    export PATH="$JAVA_HOME/bin:$PATH"
-fi
-if [ -x /opt/maven/bin/mvn ]; then
-    export MAVEN_HOME=/opt/maven
-    export PATH="$MAVEN_HOME/bin:$PATH"
-fi

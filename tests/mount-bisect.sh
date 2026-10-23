@@ -43,19 +43,15 @@ run_case "+ creds/claude 嵌套挂载" \
     -v "$SB:$TGT" -w "$TGT" \
     -v "$SB/creds/claude:/home/node/.claude"
 
-run_case "+ creds/codex + m2 + gradle" \
+run_case "+ creds/codex" \
     -v "$SB:$TGT" -w "$TGT" \
     -v "$SB/creds/claude:/home/node/.claude" \
-    -v "$SB/creds/codex:/home/node/.codex" \
-    -v "$HOME/.m2/repository:/home/node/.m2/repository" \
-    -v "$SB/cache/gradle:/home/node/.gradle"
+    -v "$SB/creds/codex:/home/node/.codex"
 
 run_case "+ entrypoint.sh 单文件只读挂载" \
     -v "$SB:$TGT" -w "$TGT" \
     -v "$SB/creds/claude:/home/node/.claude" \
     -v "$SB/creds/codex:/home/node/.codex" \
-    -v "$HOME/.m2/repository:/home/node/.m2/repository" \
-    -v "$SB/cache/gradle:/home/node/.gradle" \
     -v "$SB/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro"
 
 run_case "+ --memory 8192M --name ai-ai-sandbox-*" \
@@ -63,8 +59,6 @@ run_case "+ --memory 8192M --name ai-ai-sandbox-*" \
     -v "$SB:$TGT" -w "$TGT" \
     -v "$SB/creds/claude:/home/node/.claude" \
     -v "$SB/creds/codex:/home/node/.codex" \
-    -v "$HOME/.m2/repository:/home/node/.m2/repository" \
-    -v "$SB/cache/gradle:/home/node/.gradle" \
     -v "$SB/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro"
 
 run_case "+ AIBOX_* 环境变量(含真实代理)" \
@@ -72,8 +66,6 @@ run_case "+ AIBOX_* 环境变量(含真实代理)" \
     -v "$SB:$TGT" -w "$TGT" \
     -v "$SB/creds/claude:/home/node/.claude" \
     -v "$SB/creds/codex:/home/node/.codex" \
-    -v "$HOME/.m2/repository:/home/node/.m2/repository" \
-    -v "$SB/cache/gradle:/home/node/.gradle" \
     -v "$SB/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro" \
     -e AIBOX_PROXY \
     -e "AIBOX_PROXY_SRC=aibox.conf" \

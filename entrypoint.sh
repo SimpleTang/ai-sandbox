@@ -116,79 +116,6 @@ if [[ "$(id -u)" -eq 0 ]]; then
 fi
 
 BASHRC="$HOME/.bashrc"
-MAVEN_SETTINGS="$HOME/.m2/settings.xml"
-GRADLE_PROPERTIES="$HOME/.gradle/gradle.properties"
-MAVEN_PROXY_MARKER="<!-- Managed by ai-box: proxy settings -->"
-GRADLE_PROXY_BEGIN="# >>> ai-box managed proxy >>>"
-GRADLE_PROXY_END="# <<< ai-box managed proxy <<<"
-
-# 去掉 ai-box 自己写入的 Gradle 代理块,保留用户的其他 gradle.properties 配置。
-# 旧版本生成的是一个不带标记、只含五个代理属性的文件,也一并识别并清理。
-remove_aibox_gradle_proxy() {
-    local file="$GRADLE_PROPERTIES" tmp nonempty_lines
-    [[ -f "$file" ]] || return 0
-
-    if grep -qxF "$GRADLE_PROXY_BEGIN" "$file"; then
-        grep -qxF "$GRADLE_PROXY_END" "$file" || return 1
-        [[ -w "$file" ]] || return 1
-        tmp="$(mktemp "${file}.aibox.XXXXXX")" || return 1
-        if ! awk -v begin="$GRADLE_PROXY_BEGIN" -v end="$GRADLE_PROXY_END" '
-            $0 == begin { managed = 1; next }
-            $0 == end   { managed = 0; next }
-            !managed    { print }
-        ' "$file" > "$tmp"; then
-            rm -f "$tmp"
-            return 1
-        fi
-        if grep -q '[^[:space:]]' "$tmp"; then
-            mv "$tmp" "$file"
-        else
-            rm -f "$tmp" "$file"
-        fi
-        return 0
-    fi
-
-    nonempty_lines="$(sed '/^[[:space:]]*$/d' "$file" | wc -l | tr -d '[:space:]')"
-    if [[ "$nonempty_lines" == "5" ]] \
-       && grep -qxF 'systemProp.http.proxyHost=127.0.0.1' "$file" \
-       && grep -qE '^systemProp.http.proxyPort=[0-9]+$' "$file" \
-       && grep -qxF 'systemProp.https.proxyHost=127.0.0.1' "$file" \
-       && grep -qE '^systemProp.https.proxyPort=[0-9]+$' "$file" \
-       && grep -qxF 'systemProp.http.nonProxyHosts=localhost|127.0.0.1' "$file"; then
-        rm -f "$file"
-    fi
-}
-
-remove_aibox_maven_proxy() {
-    [[ -f "$MAVEN_SETTINGS" ]] || return 0
-    if grep -qF "$MAVEN_PROXY_MARKER" "$MAVEN_SETTINGS"; then
-        [[ -w "$MAVEN_SETTINGS" ]] || return 1
-        rm -f "$MAVEN_SETTINGS"
-    fi
-}
-
-# ---- 可选 Java / Maven 工具链 ----
-# Dockerfile 只安装 third_party/ 中实际提供的组件。这里按安装结果设置环境,
-# 同时写入 .bashrc,让 `aibox enter` 打开的新交互 shell 继承相同配置。
-TOOLCHAIN_BIN_PATH=""
-if [[ -x /opt/java/jdk8/bin/java ]]; then
-    export JAVA_HOME=/opt/java/jdk8
-    TOOLCHAIN_BIN_PATH="$JAVA_HOME/bin"
-    echo 'export JAVA_HOME=/opt/java/jdk8' >> "$BASHRC"
-fi
-if [[ -x /opt/maven/bin/mvn ]]; then
-    export MAVEN_HOME=/opt/maven
-    if [[ -n "$TOOLCHAIN_BIN_PATH" ]]; then
-        TOOLCHAIN_BIN_PATH="$TOOLCHAIN_BIN_PATH:$MAVEN_HOME/bin"
-    else
-        TOOLCHAIN_BIN_PATH="$MAVEN_HOME/bin"
-    fi
-    echo 'export MAVEN_HOME=/opt/maven' >> "$BASHRC"
-fi
-if [[ -n "$TOOLCHAIN_BIN_PATH" ]]; then
-    export PATH="$TOOLCHAIN_BIN_PATH:$PATH"
-    printf 'export PATH="%s:$PATH"\n' "$TOOLCHAIN_BIN_PATH" >> "$BASHRC"
-fi
 
 # ---- 时区 ----
 # root 阶段已设置系统时区;这里持久化 shell 环境供 aibox enter 复用。
@@ -247,56 +174,8 @@ if [[ -n "${AIBOX_PROXY:-}" ]]; then
         echo "export no_proxy=$NO_PROXY"
     } >> "$BASHRC"
 
-    # ---- JVM 系工具(Maven/Gradle)不认 HTTP_PROXY 环境变量,单独生成代理配置 ----
-    # 任何一步失败都不该让容器起不来(set -e 下先检查目录可写)。
-    mkdir -p "$HOME/.m2" 2>/dev/null || true
-    if [[ ! -w "$HOME/.m2" ]]; then
-        echo "==> ⚠️  $HOME/.m2 不可写(属主异常?),跳过 Maven 代理配置 —— mvn 将拉不到依赖!"
-    elif [[ ! -f "$MAVEN_SETTINGS" ]] || grep -qF "$MAVEN_PROXY_MARKER" "$MAVEN_SETTINGS"; then
-        cat > "$MAVEN_SETTINGS" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-$MAVEN_PROXY_MARKER
-<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0">
-  <proxies>
-    <proxy>
-      <id>gost-http</id><active>true</active><protocol>http</protocol>
-      <host>127.0.0.1</host><port>${LOCAL_HTTP_PORT}</port>
-      <nonProxyHosts>localhost|127.0.0.1</nonProxyHosts>
-    </proxy>
-    <proxy>
-      <id>gost-https</id><active>true</active><protocol>https</protocol>
-      <host>127.0.0.1</host><port>${LOCAL_HTTP_PORT}</port>
-      <nonProxyHosts>localhost|127.0.0.1</nonProxyHosts>
-    </proxy>
-  </proxies>
-</settings>
-EOF
-    fi
-    mkdir -p "$HOME/.gradle" 2>/dev/null || true
-    if [[ ! -w "$HOME/.gradle" ]]; then
-        echo "==> ⚠️  $HOME/.gradle 不可写(属主异常?),跳过 Gradle 代理配置 —— gradle 将拉不到依赖!"
-    elif ! remove_aibox_gradle_proxy; then
-        echo "==> ⚠️  无法更新 $GRADLE_PROPERTIES,跳过 Gradle 代理配置。"
-    elif [[ -f "$GRADLE_PROPERTIES" && ! -w "$GRADLE_PROPERTIES" ]]; then
-        echo "==> ⚠️  $GRADLE_PROPERTIES 不可写,跳过 Gradle 代理配置。"
-    else
-        [[ -s "$GRADLE_PROPERTIES" ]] && printf '\n' >> "$GRADLE_PROPERTIES"
-        cat >> "$GRADLE_PROPERTIES" <<EOF
-$GRADLE_PROXY_BEGIN
-systemProp.http.proxyHost=127.0.0.1
-systemProp.http.proxyPort=${LOCAL_HTTP_PORT}
-systemProp.https.proxyHost=127.0.0.1
-systemProp.https.proxyPort=${LOCAL_HTTP_PORT}
-systemProp.http.nonProxyHosts=localhost|127.0.0.1
-$GRADLE_PROXY_END
-EOF
-    fi
     PROXY_SHOWN="${masked}  [${AIBOX_PROXY_SRC:-?}]"
 else
-    remove_aibox_maven_proxy \
-        || echo "==> ⚠️  无法清理 $MAVEN_SETTINGS 中旧的 ai-box 代理配置。"
-    remove_aibox_gradle_proxy \
-        || echo "==> ⚠️  无法清理 $GRADLE_PROPERTIES 中旧的 ai-box 代理配置。"
     PROXY_SHOWN="直连(未配置代理)"
 fi
 

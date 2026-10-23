@@ -62,6 +62,11 @@ CONTAINER_PKG_TEAM="UPBK2H6LZM"
 DEFAULT_GATEWAY="192.168.64.1"
 # 认证一步会增删的变量;AIBOX_ENV_VARS 里的其他项原样保留
 MANAGED_ENV_NAMES="ANTHROPIC_API_KEY ANTHROPIC_BASE_URL OPENAI_API_KEY"
+# 容器内存的默认值,与 ai-box 的 MEMORY / DEV_MEMORY 保持一致
+DEFAULT_MEMORY="8192M"
+# 第 1 步读出的宿主机资源;读不到时为空,资源一节就不做上限检查
+HOST_MEM_MB=""
+HOST_CPUS=""
 
 usage() {
     cat <<'USAGE'
@@ -86,6 +91,10 @@ if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
 else
     C_OK=""; C_WARN=""; C_BAD=""; C_BOLD=""; C_OFF=""
 fi
+# 交互输入(终端里的 ↑↓ 菜单,非终端时退回编号 / y/n)与 ai-box 共用
+UI_INDENT="  "
+# shellcheck source=aibox-ui.sh
+source "$SANDBOX_DIR/aibox-ui.sh"
 
 PENDING=()      # 尚未完成的必需项,结束时汇总
 NEW_ENV=()      # 本次要写进 AIBOX_ENV_VARS 的各项
@@ -99,6 +108,8 @@ CONF_TMP=""     # 正在生成的 aibox.conf,写入前被打断时清理
 cleanup() {
     [[ -z "$SETUP_TMP" ]] || rm -rf -- "$SETUP_TMP"
     [[ -z "$CONF_TMP" ]] || rm -f -- "$CONF_TMP"
+    # 选择菜单里被打断时,恢复光标和自动换行
+    ui_restore
     return 0
 }
 # 显式带回原退出码:Bash 3.2 遇到 set -u 等致命错误时,退出码会被 EXIT trap 的结果覆盖成 0
@@ -140,61 +151,52 @@ trim() {
     printf '%s' "$s"
 }
 
-# ask_yn <问题> <默认 Y|N>:回答「是」返回 0
-ask_yn() {
-    local hint ans
-    if [[ "$2" == "Y" ]]; then hint="[Y/n]"; else hint="[y/N]"; fi
-    while true; do
-        printf '  %s?%s %s %s ' "$C_BOLD" "$C_OFF" "$1" "$hint"
-        IFS= read -r ans || input_closed
-        case "$(trim "$ans")" in
-            "")
-                if [[ "$2" == "Y" ]]; then return 0; else return 1; fi
-                ;;
-            y|Y|yes|Yes|YES) return 0 ;;
-            n|N|no|No|NO)    return 1 ;;
-            *) info "请输入 y 或 n。" ;;
-        esac
+# 输入结束(EOF)时退出,避免在非交互环境里死循环
+ui_eof() { input_closed; }
+
+# pick <问题> <当前值> <手动输入提示> <校验函数> <值|标签>...:从常用选项里选,末尾自动加「手动输入」。
+# 值为空表示默认。当前值不在选项里时,作为第二项「当前:…」列出并默认选中。
+# 手动输入经校验函数检查(不通过时它负责提示),直接回车回到选项列表。结果写入 REPLY_PICK。
+pick() {
+    local q="$1" cur="$2" manual="$3" check="$4" entry def=0 i choice val found=0
+    shift 4
+    local vals=() labels=()
+    for entry in "$@"; do
+        vals+=("${entry%%|*}")
+        labels+=("${entry#*|}")
     done
-}
-
-# ask_line <变量名> <提示>:读一行,去掉首尾空白
-ask_line() {
-    local reply
-    printf '  %s?%s %s' "$C_BOLD" "$C_OFF" "$2"
-    IFS= read -r reply || input_closed
-    printf -v "$1" '%s' "$(trim "$reply")"
-}
-
-# ask_secret <变量名> <提示>:输入不回显
-ask_secret() {
-    local reply
-    printf '  %s?%s %s' "$C_BOLD" "$C_OFF" "$2"
-    IFS= read -rs reply || { printf '\n'; input_closed; }
-    printf '\n'
-    printf -v "$1" '%s' "$(trim "$reply")"
-}
-
-# ask_choice <变量名> <最大编号> <默认编号>
-ask_choice() {
-    local reply
+    for (( i = 0; i < ${#vals[@]}; i++ )); do
+        if [[ "${vals[i]}" == "$cur" ]]; then
+            def=$((i + 1))
+            found=1
+        fi
+    done
+    if (( ! found )); then
+        vals=("${vals[0]}" "$cur" "${vals[@]:1}")
+        labels=("${labels[0]}" "当前:$cur" "${labels[@]:1}")
+        def=2
+    fi
+    labels+=("手动输入…")
     while true; do
-        printf '  %s?%s 请选择 [1-%s,默认 %s]: ' "$C_BOLD" "$C_OFF" "$2" "$3"
-        IFS= read -r reply || input_closed
-        reply="$(trim "$reply")"
-        [[ -n "$reply" ]] || reply="$3"
-        if [[ "$reply" =~ ^[0-9]+$ ]] && (( reply >= 1 && reply <= $2 )); then
-            printf -v "$1" '%s' "$reply"
+        ui_menu choice "$def" "$q" "${labels[@]}"
+        if (( choice <= ${#vals[@]} )); then
+            REPLY_PICK="${vals[choice - 1]}"
             return 0
         fi
-        info "请输入 1 到 $2 之间的数字。"
+        while true; do
+            ui_line val "$manual"
+            [[ -n "$val" ]] || break
+            if "$check" "$val"; then
+                REPLY_PICK="$val"
+                return 0
+            fi
+        done
     done
 }
 
 pause_enter() {
     local reply
-    printf '  %s?%s %s' "$C_BOLD" "$C_OFF" "$1"
-    IFS= read -r reply || input_closed
+    ui_line reply "$1"
 }
 
 # ---- 通用工具 ----
@@ -289,6 +291,31 @@ rc_append() {
     printf '%s\n' "$@" >> "$file"
 }
 
+# mem_mb <大小>:把 8G / 4096M 换算成 MB;格式不对返回 1
+mem_mb() {
+    local re='^([1-9][0-9]*)([MmGg])$'
+    [[ "$1" =~ $re ]] || return 1
+    case "${BASH_REMATCH[2]}" in
+        G|g) printf '%s' $(( BASH_REMATCH[1] * 1024 )) ;;
+        *)   printf '%s' "${BASH_REMATCH[1]}" ;;
+    esac
+}
+
+# mem_label <大小>:整 G 的显示成 16G,其余原样
+mem_label() {
+    local mb
+    mb="$(mem_mb "$1")" || { printf '%s' "$1"; return 0; }
+    if (( mb % 1024 == 0 )); then printf '%sG' $(( mb / 1024 )); else printf '%sM' "$mb"; fi
+}
+
+# res_label <内存> <CPU>:空值显示为默认
+res_label() {
+    local mem cpu
+    if [[ -n "$1" ]]; then mem="$(mem_label "$1")"; else mem="$(mem_label "$DEFAULT_MEMORY")(默认)"; fi
+    if [[ -n "$2" ]]; then cpu="$2 核"; else cpu="默认"; fi
+    printf '内存 %s / CPU %s' "$mem" "$cpu"
+}
+
 # 非登录 shell 的 PATH 可能缺 /usr/local/bin;官方安装器固定装在那里,找到就补进本进程 PATH
 container_found() {
     command -v container >/dev/null 2>&1 && return 0
@@ -322,6 +349,11 @@ version_lt() {
 
 # 与 aibox status 同一口径:能列容器即服务在跑
 service_running() { container ls >/dev/null 2>&1; }
+
+machine_exists() {
+    container_found && service_running \
+        && container machine list -q 2>/dev/null | grep -qxF "$DEV_MACHINE_NAME"
+}
 
 image_exists() { container image inspect "$1" >/dev/null 2>&1; }
 
@@ -362,8 +394,22 @@ step_host() {
         ok "macOS $ver"
     else
         warn "macOS ${ver:-版本未知}:Apple container 官方只支持 macOS 26 及以上,旧系统上可能无法正常工作。"
-        if (( ! CHECK_ONLY )) && ! ask_yn "仍要继续?" N; then
+        if (( ! CHECK_ONLY )) && ! ui_yn "仍要继续?" N; then
             exit 1
+        fi
+    fi
+    HOST_MEM_MB="$(sysctl -n hw.memsize 2>/dev/null || true)"
+    if [[ "$HOST_MEM_MB" =~ ^[0-9]+$ ]]; then
+        HOST_MEM_MB=$(( HOST_MEM_MB / 1024 / 1024 ))
+    else
+        HOST_MEM_MB=""
+    fi
+    HOST_CPUS="$(sysctl -n hw.ncpu 2>/dev/null || true)"
+    [[ "$HOST_CPUS" =~ ^[1-9][0-9]*$ ]] || HOST_CPUS=""
+    if [[ -n "$HOST_MEM_MB" && -n "$HOST_CPUS" ]]; then
+        ok "内存 $(mem_label "${HOST_MEM_MB}M"),CPU $HOST_CPUS 核"
+        if (( HOST_MEM_MB < 16384 )); then
+            warn "内存不到 16G:容器默认各用 8G,第 5 步可以把容器内存调小,例如 4G。"
         fi
     fi
 }
@@ -419,10 +465,10 @@ step_container() {
             pending "安装 Apple container:$CONTAINER_RELEASES_URL"
             return 0
         fi
-        info "1) 自动下载已验证的 ${CONTAINER_TESTED_VERSION} 官方安装包,核对 Apple 签名后打开安装器(推荐)"
-        info "2) 用浏览器打开下载页,自己下载 .pkg 安装"
-        info "3) 暂时跳过"
-        ask_choice choice 3 1
+        ui_menu choice 1 "怎样安装?" \
+            "自动下载已验证的 ${CONTAINER_TESTED_VERSION} 官方安装包,核对 Apple 签名后打开安装器(推荐)" \
+            "用浏览器打开下载页,自己下载 .pkg 安装" \
+            "暂时跳过"
         case "$choice" in
             1)
                 if ! container_pkg_open; then
@@ -475,7 +521,7 @@ step_service() {
         return 0
     fi
     info "首次启动会下载 Apple 推荐的默认 Linux 内核,需要联网,可能要一两分钟。"
-    if ! ask_yn "现在启动?" Y; then
+    if ! ui_yn "现在启动?" Y; then
         pending "启动 container 服务:container system start"
         return 0
     fi
@@ -486,7 +532,7 @@ step_service() {
             return 0
         fi
         bad "启动失败。上面是 container system start 的输出。"
-        if ! ask_yn "重试?" Y; then
+        if ! ui_yn "重试?" Y; then
             pending "启动 container 服务:container system start"
             return 0
         fi
@@ -550,7 +596,7 @@ step_command_homebrew() {
         info "这多半是之前用 git 克隆安装时建的软链接;删掉后输入 aibox 就会用 Homebrew 安装的版本。"
         if (( CHECK_ONLY )); then
             pending "删除旧的 $(tilde "$LINK_PATH")"
-        elif ask_yn "删除 $(tilde "$LINK_PATH")?" Y; then
+        elif ui_yn "删除 $(tilde "$LINK_PATH")?" Y; then
             rm -f -- "$LINK_PATH"
             hash -r
             ok "已删除 $(tilde "$LINK_PATH")"
@@ -582,7 +628,7 @@ step_command() {
         ok "Tab 补全已配置"
         if grep -E '^[^#]*ai-box-completion\.sh' "$rc" | grep -qvF "$COMPLETION"; then
             warn "$(tilde "$rc") 里还有指向别处的补全行。"
-            if (( ! CHECK_ONLY )) && ask_yn "把那些旧行注释掉?" Y; then
+            if (( ! CHECK_ONLY )) && ui_yn "把那些旧行注释掉?" Y; then
                 rc_disable_old_completion "$rc"
                 RC_CHANGED="$rc"
                 ok "已注释掉旧的补全行"
@@ -594,7 +640,7 @@ step_command() {
         warn "$(tilde "$rc") 里的 Tab 补全指向别的位置(旧的安装?),现在应为 $(tilde "$COMPLETION")。"
         if (( CHECK_ONLY )); then
             info "运行 aibox setup 可以自动改过来。"
-        elif ask_yn "改为当前安装的补全脚本(旧行会被注释掉,不删除)?" Y; then
+        elif ui_yn "改为当前安装的补全脚本(旧行会被注释掉,不删除)?" Y; then
             rc_disable_old_completion "$rc"
             rc_append "$rc" "" "# aibox:Tab 补全(由 aibox setup 添加)" "source $(sq "$COMPLETION")"
             RC_CHANGED="$rc"
@@ -602,7 +648,7 @@ step_command() {
         fi
     elif (( CHECK_ONLY )); then
         info "可选:Tab 补全未配置。"
-    elif ask_yn "启用 Tab 补全(写入 $(tilde "$rc"))?" Y; then
+    elif ui_yn "启用 Tab 补全(写入 $(tilde "$rc"))?" Y; then
         rc_append "$rc" "" "# aibox:Tab 补全(由 aibox setup 添加)" "source $(sq "$COMPLETION")"
         RC_CHANGED="$rc"
         ok "已写入 $(tilde "$rc")"
@@ -621,7 +667,7 @@ step_command_git() {
             warn "$(tilde "$LINK_PATH") 已存在,但指向 ${real:-无法解析的位置},不是当前仓库。"
             if (( CHECK_ONLY )); then
                 pending "让 $(tilde "$LINK_PATH") 指向 $(tilde "$AIBOX")"
-            elif ask_yn "改为指向当前仓库?" Y; then
+            elif ui_yn "改为指向当前仓库?" Y; then
                 link_install
             else
                 pending "让 $(tilde "$LINK_PATH") 指向 $(tilde "$AIBOX")"
@@ -631,7 +677,7 @@ step_command_git() {
         bad "还没有安装 aibox 命令。"
         if (( CHECK_ONLY )); then
             pending "安装 aibox 命令:ln -s $(tilde "$AIBOX") $(tilde "$LINK_PATH")"
-        elif ask_yn "创建 $(tilde "$LINK_PATH")(指向仓库里的 ai-box)?" Y; then
+        elif ui_yn "创建 $(tilde "$LINK_PATH")(指向仓库里的 ai-box)?" Y; then
             link_install
         else
             pending "安装 aibox 命令(在此之前可以用仓库里的 ./ai-box)"
@@ -655,7 +701,7 @@ step_command_path() {
         bad "$(tilde "$BIN_DIR") 不在 PATH 中,终端里还不能直接输入 aibox。"
         if (( CHECK_ONLY )); then
             pending "把 $(tilde "$BIN_DIR") 加入 PATH"
-        elif ask_yn "把它写入 $(tilde "$rc")?" Y; then
+        elif ui_yn "把它写入 $(tilde "$rc")?" Y; then
             # shellcheck disable=SC2016 # 原样写入,由 shell 启动时展开
             rc_append "$rc" "" "# aibox:把 ~/.local/bin 加入 PATH(由 aibox setup 添加)" \
                 'export PATH="$HOME/.local/bin:$PATH"'
@@ -671,17 +717,21 @@ step_command_path() {
 CUR_PROXY=""
 CUR_TZ=""
 CUR_LANG=""
+CUR_MEMORY=""
+CUR_CPUS=""
 CUR_ENV=()
+CONF_WRITTEN=0
 
-# 在子 shell 里 source 配置,以 NUL 分隔输出:代理、时区、语言、AIBOX_ENV_VARS 项数及各项。
+# 在子 shell 里 source 配置,以 NUL 分隔输出:代理、时区、语言、内存、CPU、AIBOX_ENV_VARS 项数及各项。
 # 与 ai-box 一样直接 source —— aibox.conf 本来就会在每次启动时被 source。
 conf_dump() {
     (
         set +eu
-        AIBOX_PROXY=""; AIBOX_TZ=""; AIBOX_LANG=""; AIBOX_ENV_VARS=()
+        AIBOX_PROXY=""; AIBOX_TZ=""; AIBOX_LANG=""; AIBOX_MEMORY=""; AIBOX_CPUS=""; AIBOX_ENV_VARS=()
         # shellcheck disable=SC1090
         source "$1" >/dev/null 2>&1 </dev/null
-        printf '%s\0' "$AIBOX_PROXY" "$AIBOX_TZ" "$AIBOX_LANG" "${#AIBOX_ENV_VARS[@]}"
+        printf '%s\0' "$AIBOX_PROXY" "$AIBOX_TZ" "$AIBOX_LANG" "$AIBOX_MEMORY" "$AIBOX_CPUS" \
+            "${#AIBOX_ENV_VARS[@]}"
         for entry in "${AIBOX_ENV_VARS[@]}"; do
             printf '%s\0' "$entry"
         done
@@ -690,14 +740,16 @@ conf_dump() {
 
 conf_load() {
     local item i=0
-    CUR_PROXY=""; CUR_TZ=""; CUR_LANG=""; CUR_ENV=()
+    CUR_PROXY=""; CUR_TZ=""; CUR_LANG=""; CUR_MEMORY=""; CUR_CPUS=""; CUR_ENV=()
     [[ -f "$CONF" ]] || return 0
     while IFS= read -r -d '' item; do
         case "$i" in
             0) CUR_PROXY="$item" ;;
             1) CUR_TZ="$item" ;;
             2) CUR_LANG="$item" ;;
-            3) ;;
+            3) CUR_MEMORY="$item" ;;
+            4) CUR_CPUS="$item" ;;
+            5) ;;
             *) CUR_ENV+=("$item") ;;
         esac
         i=$((i + 1))
@@ -737,6 +789,7 @@ conf_show() {
     info "代理    : $(proxy_label "$CUR_PROXY")"
     info "时区    : ${CUR_TZ:-跟随宿主机}"
     info "语言    : ${CUR_LANG:-跟随宿主机}"
+    info "资源    : $(res_label "$CUR_MEMORY" "$CUR_CPUS")"
     info "环境变量: $(env_names "${CUR_ENV[@]+"${CUR_ENV[@]}"}")"
 }
 
@@ -773,7 +826,7 @@ gost_ensure() {
         return 0
     fi
     info "可以自动下载 gost $GOST_VERSION(Linux ARM64,MIT 许可证),并按 README 记录的 SHA-256 校验。"
-    if ask_yn "现在下载?" Y && gost_download; then
+    if ui_yn "现在下载?" Y && gost_download; then
         ok "已放入 $(tilde "$GOST_PATH")"
         NEED_REBUILD=1
         return 0
@@ -794,22 +847,23 @@ legacy_proxy() {
 
 # proxy_ask <默认值>:结果写入 REPLY_PROXY
 proxy_ask() {
-    local def="$1" url rest userinfo host gw
+    local def="$1" url="" rest userinfo host gw choice
     local re='^(https?|socks5h?)://([^[:space:]/@]+@)?[^[:space:]/@]+:[0-9]+$'
-    info "格式:协议://[用户名:密码@]主机:端口,协议可以是 http、https、socks5、socks5h"
-    info "例如 socks5h://user:pass@proxy.example.com:1080(socks5h 由代理端解析域名,通常优先选它)"
-    info "用户名或密码里的 @ : / 等字符要做 URL 编码,例如 @ 写成 %40"
-    while true; do
-        if [[ -n "$def" ]]; then
-            ask_line url "代理地址(回车沿用 $(mask_proxy "$def")): "
-            [[ -n "$url" ]] || url="$def"
-        else
-            ask_line url "代理地址: "
-        fi
-        url="${url%/}"
-        [[ "$url" =~ $re ]] && break
-        bad "格式不对,请按 协议://[用户名:密码@]主机:端口 填写。"
-    done
+    if [[ -n "$def" && "$def" =~ $re ]]; then
+        ui_menu choice 1 "代理地址" "沿用 $(mask_proxy "$def")" "填写新地址"
+        [[ "$choice" != 1 ]] || url="$def"
+    fi
+    if [[ -z "$url" ]]; then
+        info "格式:协议://[用户名:密码@]主机:端口,协议可以是 http、https、socks5、socks5h"
+        info "例如 socks5h://user:pass@proxy.example.com:1080(socks5h 由代理端解析域名,通常优先选它)"
+        info "用户名或密码里的 @ : / 等字符要做 URL 编码,例如 @ 写成 %40"
+        while true; do
+            ui_line url "代理地址: "
+            url="${url%/}"
+            [[ "$url" =~ $re ]] && break
+            bad "格式不对,请按 协议://[用户名:密码@]主机:端口 填写。"
+        done
+    fi
 
     # 容器里的 127.0.0.1 是容器自己;本机代理软件要通过宿主机在容器网络中的地址访问
     rest="${url#*://}"
@@ -822,7 +876,7 @@ proxy_ask() {
             gw="$(container_gateway)"
             warn "容器里的 $host 指向容器自己,连不到 Mac 上的代理软件。"
             info "Mac 在容器网络中的地址是 $gw;代理软件还需要开启「允许局域网连接」(Allow LAN)。"
-            if ask_yn "改用 $gw?" Y; then
+            if ui_yn "改用 $gw?" Y; then
                 url="${url%%://*}://$userinfo$gw:${url##*:}"
                 ok "代理地址改为 $(mask_proxy "$url")"
             fi
@@ -831,28 +885,57 @@ proxy_ask() {
     REPLY_PROXY="$url"
 }
 
-# 从宿主机经代理访问 Claude API,只看能否连通(任何 HTTP 状态码都算通)
+# 从宿主机经代理不带 key 访问 Claude API。只有返回 Claude API 自己的 401(authentication_error)
+# 才算接通;其他状态码可能来自代理或中间设备的拦截页,不能当作接通。
 proxy_probe() {
-    local esc out code err
+    local url="$1" esc out code err body
+    # 容器里的 gost 把域名原样交给 SOCKS5 代理解析;这里也让代理端解析(socks5h),
+    # 否则 Mac 上开着 fake-ip 模式的代理软件时,本机解析出的 198.18.x.x 假地址会让探测超时
+    case "$url" in
+        socks5://*) url="socks5h://${url#socks5://}" ;;
+    esac
     # 代理地址经 -K - 从 stdin 交给 curl,不出现在进程参数里(其中可能有密码)
-    esc="$(printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
-    info "正在通过代理访问 https://api.anthropic.com ..."
+    esc="$(printf '%s' "$url" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+    setup_tmp
+    body="$SETUP_TMP/probe.body"
+    rm -f -- "$body"
+    info "正在通过代理访问 https://api.anthropic.com/v1/models(不带 key)..."
     out="$(printf 'proxy = "%s"\n' "$esc" \
-        | curl -sS -o /dev/null -w '\n%{http_code}' --max-time 15 -K - https://api.anthropic.com/ 2>&1)" || true
+        | curl -sS -o "$body" -w '\n%{http_code}' --max-time 15 -K - \
+            https://api.anthropic.com/v1/models 2>&1)" || true
     code="$(printf '%s\n' "$out" | tail -n 1)"
-    if [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]; then
-        ok "代理可用(api.anthropic.com 返回 HTTP $code)"
+    if [[ "$code" == 401 ]] && grep -q 'authentication_error' "$body" 2>/dev/null; then
+        ok "已接通 Claude API(未带 key 时返回 401,符合预期)"
+    elif [[ "$code" == 403 ]]; then
+        warn "连上了 Claude API,但被拒绝访问(HTTP 403):代理出口 IP 所在地区可能不受支持。"
+        info "换一个支持地区的出口后重跑 aibox setup。配置照样会保存。"
+    elif [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]; then
+        warn "代理有响应,但不是 Claude API 的预期结果(HTTP $code):代理可能拦截或改写了请求。"
+        info "请确认代理类型(http / socks5)和端口是否对应。配置照样会保存,之后可以重跑 aibox setup 修改。"
     else
         err="$(printf '%s\n' "$out" | sed '$d' | head -n 1)"
         warn "无法通过代理访问:${err:-未知错误}"
         info "请检查地址、端口和账号密码。配置照样会保存,之后可以重跑 aibox setup 修改。"
     fi
+    rm -f -- "$body"
 }
 
 tz_valid() {
     local re='^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$'
     [[ "$1" =~ $re ]] || return 1
     [[ ! -d /usr/share/zoneinfo || -f "/usr/share/zoneinfo/$1" ]]
+}
+
+tz_check() {
+    tz_valid "$1" && return 0
+    bad "找不到时区 ${1}。"
+    return 1
+}
+
+lang_check() {
+    locale_valid "$1" && return 0
+    bad "镜像里没有 ${1},请从 $LOCALES 中选择。"
+    return 1
 }
 
 LOCALES=""
@@ -863,16 +946,17 @@ locale_valid() {
     return 1
 }
 
-# env_ask <secret|plain> <NAME> <说明>:有旧值时回车沿用、输入 - 删除;结果追加进 NEW_ENV
+# env_ask <secret|plain> <NAME> <说明>:有旧值时选择沿用、换新值或删除;结果追加进 NEW_ENV
 env_ask() {
-    local kind="$1" name="$2" label="$3" old="" val
+    local kind="$1" name="$2" label="$3" old="" val shown choice
     if env_find "$name" "${CUR_ENV[@]+"${CUR_ENV[@]}"}"; then
         old="$REPLY_VALUE"
-        if [[ "$kind" == "secret" ]]; then
-            info "$label:已配置($(mask_secret "$old"))。回车沿用,输入 - 删除,或粘贴新值。"
-        else
-            info "$label:已配置($old)。回车沿用,输入 - 删除,或输入新值。"
-        fi
+        if [[ "$kind" == "secret" ]]; then shown="$(mask_secret "$old")"; else shown="$old"; fi
+        ui_menu choice 1 "$label(已配置)" "沿用 $shown" "换成新值" "删除"
+        case "$choice" in
+            1) NEW_ENV+=("$name=$old"); return 0 ;;
+            3) return 0 ;;
+        esac
     elif [[ "$kind" == "secret" ]]; then
         info "$label:粘贴后回车(输入不会显示);不需要就直接回车跳过。"
     else
@@ -880,15 +964,12 @@ env_ask() {
     fi
     while true; do
         if [[ "$kind" == "secret" ]]; then
-            ask_secret val "$name: "
+            ui_secret val "$name: "
         else
-            ask_line val "$name: "
+            ui_line val "$name: "
         fi
-        if [[ -z "$val" ]]; then
-            val="$old"
-        elif [[ "$val" == "-" ]]; then
-            val=""
-        fi
+        # 选了「换成新值」又直接回车:保持原值
+        [[ -n "$val" ]] || val="$old"
         if [[ "$kind" == "plain" && -n "$val" && ! "$val" =~ ^https?:// ]]; then
             bad "地址需要以 http:// 或 https:// 开头。"
             continue
@@ -900,7 +981,7 @@ env_ask() {
 }
 
 conf_write() {
-    local proxy="$1" tz="$2" lang="$3" env_block="" entry backup=""
+    local proxy="$1" tz="$2" lang="$3" memory="$4" cpus="$5" env_block="" entry backup=""
     for entry in "${NEW_ENV[@]+"${NEW_ENV[@]}"}"; do
         env_block="$env_block  $(sq "$entry")"$'\n'
     done
@@ -912,11 +993,14 @@ conf_write() {
     {
         printf '# 由 aibox setup 生成于 %s。可以直接编辑,也可以重跑 aibox setup 修改。\n#\n' \
             "$(date '+%Y-%m-%d %H:%M')"
-        W_PROXY="$(sq "$proxy")" W_TZ="$(sq "$tz")" W_LANG="$(sq "$lang")" W_ENV="$env_block" \
+        W_PROXY="$(sq "$proxy")" W_TZ="$(sq "$tz")" W_LANG="$(sq "$lang")" \
+        W_MEMORY="$(sq "$memory")" W_CPUS="$(sq "$cpus")" W_ENV="$env_block" \
             awk '
                 /^AIBOX_PROXY=/      { print "AIBOX_PROXY=" ENVIRON["W_PROXY"]; next }
                 /^AIBOX_TZ=/         { print "AIBOX_TZ=" ENVIRON["W_TZ"]; next }
                 /^AIBOX_LANG=/       { print "AIBOX_LANG=" ENVIRON["W_LANG"]; next }
+                /^AIBOX_MEMORY=/     { print "AIBOX_MEMORY=" ENVIRON["W_MEMORY"]; next }
+                /^AIBOX_CPUS=/       { print "AIBOX_CPUS=" ENVIRON["W_CPUS"]; next }
                 /^AIBOX_ENV_VARS=\(/ { in_env = 1 }
                 in_env && /^\)/      { printf "%s", ENVIRON["W_ENV"]; in_env = 0 }
                 { print }
@@ -926,7 +1010,7 @@ conf_write() {
     # 回读校验:按 ai-box 的方式 source 新文件,取到的值必须与输入逐字一致
     setup_tmp
     {
-        printf '%s\0' "$proxy" "$tz" "$lang" "${#NEW_ENV[@]}"
+        printf '%s\0' "$proxy" "$tz" "$lang" "$memory" "$cpus" "${#NEW_ENV[@]}"
         for entry in "${NEW_ENV[@]+"${NEW_ENV[@]}"}"; do
             printf '%s\0' "$entry"
         done
@@ -946,73 +1030,138 @@ conf_write() {
     fi
     mv -f -- "$CONF_TMP" "$CONF"
     CONF_TMP=""
+    CONF_WRITTEN=1
     ok "已写入 $(tilde "$CONF")(权限 600)"
     [[ -z "$backup" ]] || info "原配置已备份到 $(tilde "$backup")"
     return 0
 }
 
+# 手动输入内存时的校验:带单位,不超过本机内存
+mem_check() {
+    local mb
+    if ! mb="$(mem_mb "$1")"; then
+        bad "格式不对,请写成数字加单位 G 或 M,例如 8G、4096M。"
+        return 1
+    fi
+    if [[ -n "$HOST_MEM_MB" ]] && (( mb > HOST_MEM_MB )); then
+        bad "超过了本机内存 $(mem_label "${HOST_MEM_MB}M")。"
+        return 1
+    fi
+}
+
+cpu_check() {
+    if [[ ! "$1" =~ ^[1-9][0-9]*$ ]]; then
+        bad "请输入正整数。"
+        return 1
+    fi
+    if [[ -n "$HOST_CPUS" ]] && (( $1 > HOST_CPUS )); then
+        bad "超过了本机的 $HOST_CPUS 核。"
+        return 1
+    fi
+}
+
+# res_ask:询问内存和 CPU,结果写入 REPLY_MEMORY / REPLY_CPUS(空值 = 默认)
+res_ask() {
+    local size cores opts=()
+    info "临时容器每次启动时使用;长期容器只在首次创建时使用,已创建的会在写入配置后询问是否同步。"
+    info "Mac 按需给虚拟机分配内存,设大一些不会立刻占满宿主机内存;Claude Code 长会话内存只增不减,"
+    info "建议至少 8G。${HOST_MEM_MB:+本机内存 $(mem_label "${HOST_MEM_MB}M"),CPU $HOST_CPUS 核。}"
+    # 常用选项只列不超过本机的
+    opts=("|默认 $(mem_label "$DEFAULT_MEMORY")")
+    for size in 4 12 16 24 32 64; do
+        [[ -n "$HOST_MEM_MB" ]] && (( size * 1024 > HOST_MEM_MB )) && continue
+        opts+=("${size}G|${size}G")
+    done
+    pick "内存" "$(printf '%s' "$CUR_MEMORY" | tr 'mg' 'MG')" \
+        "内存大小(数字加 G 或 M,如 20G;直接回车回到列表): " mem_check "${opts[@]}"
+    REPLY_MEMORY="$(printf '%s' "$REPLY_PICK" | tr 'mg' 'MG')"
+
+    opts=("|默认(临时容器 4 核,长期容器为本机的一半)")
+    for cores in 2 4 6 8 12 16; do
+        [[ -n "$HOST_CPUS" ]] && (( cores > HOST_CPUS )) && continue
+        opts+=("$cores|$cores 核")
+    done
+    pick "CPU" "$CUR_CPUS" "CPU 核数(正整数;直接回车回到列表): " cpu_check "${opts[@]}"
+    REPLY_CPUS="$REPLY_PICK"
+}
+
+# res_sync <内存> <CPU>:资源有改动且长期容器已存在时,询问是否用 aibox set 同步过去
+res_sync() {
+    local memory="$1" cpus="$2" args=()
+    [[ "$memory" != "$CUR_MEMORY" || "$cpus" != "$CUR_CPUS" ]] || return 0
+    machine_exists || return 0
+    args=("memory=${memory:-$DEFAULT_MEMORY}")
+    # 清空 CPU 时没有「恢复默认」的设置可用,保持长期容器现有的核数
+    [[ -z "$cpus" ]] || args+=("cpus=$cpus")
+    echo
+    info "长期容器已经创建,aibox.conf 里的资源只在首次创建时使用。"
+    [[ -n "$cpus" || -z "$CUR_CPUS" ]] || info "CPU 恢复默认不会改动已有长期容器的核数,需要时用 aibox set cpus=<核数> 调整。"
+    if ui_yn "把新的资源设置同步到长期容器?(aibox set ${args[*]},下次 aibox restart 后生效)" Y; then
+        if bash "$AIBOX" set "${args[@]}"; then
+            ok "已同步"
+        else
+            pending "同步长期容器资源:aibox set ${args[*]}"
+        fi
+    fi
+}
+
 conf_wizard() {
-    local proxy="" tz="" lang="" choice def legacy host_tz host_lang entry removed=""
+    local proxy="" tz="" lang="" memory="" cpus="" choice def legacy host_tz host_lang entry removed=""
 
     part "① 网络代理"
-    info "1) 直连:网络能直接访问 Claude / OpenAI,或者 Mac 上的代理软件已开启 TUN(增强)模式"
-    info "2) 上游代理:容器流量全部经指定代理出去(HTTP / HTTPS / SOCKS5),例如固定住宅 IP"
     legacy="$(legacy_proxy)"
     def=1
     [[ -z "$CUR_PROXY$legacy" ]] || def=2
-    ask_choice choice 2 "$def"
+    ui_menu choice "$def" "容器怎样联网?" \
+        "直连(能直接访问 Claude / OpenAI,或 Mac 上的代理软件已开 TUN 模式)" \
+        "上游代理(容器流量全部经指定的 HTTP / HTTPS / SOCKS5 代理,例如固定住宅 IP)"
     if [[ "$choice" == 2 ]]; then
         proxy_ask "${CUR_PROXY:-$legacy}"
         proxy="$REPLY_PROXY"
         gost_ensure
-        if ask_yn "测试能否通过这个代理访问 Claude API?" Y; then
+        if ui_yn "测试能否通过这个代理访问 Claude API?" Y; then
             proxy_probe "$proxy"
         fi
     fi
 
     part "② 时区"
     host_tz="$(readlink /etc/localtime 2>/dev/null | sed -n 's#.*/zoneinfo/##p')"
-    info "留空 = 跟随宿主机${host_tz:+(当前 $host_tz)};也可以填 IANA 时区名,如 Asia/Shanghai、America/Los_Angeles、UTC"
-    while true; do
-        if [[ -n "$CUR_TZ" ]]; then
-            ask_line tz "时区(回车沿用 $CUR_TZ,输入 - 改为跟随宿主机): "
-            [[ -n "$tz" ]] || tz="$CUR_TZ"
-        else
-            ask_line tz "时区(回车跟随宿主机): "
-        fi
-        [[ "$tz" != "-" ]] || tz=""
-        if [[ -z "$tz" ]] || tz_valid "$tz"; then
-            break
-        fi
-        bad "找不到时区 ${tz}。"
-    done
+    pick "时区" "$CUR_TZ" "时区名(IANA 格式,如 Europe/Berlin;直接回车回到列表): " tz_check \
+        "|跟随宿主机${host_tz:+(当前 $host_tz)}" \
+        "Asia/Shanghai|Asia/Shanghai(北京时间)" \
+        "Asia/Hong_Kong|Asia/Hong_Kong" \
+        "Asia/Taipei|Asia/Taipei" \
+        "Asia/Tokyo|Asia/Tokyo" \
+        "Asia/Singapore|Asia/Singapore" \
+        "America/Los_Angeles|America/Los_Angeles(美西)" \
+        "America/New_York|America/New_York(美东)" \
+        "Europe/London|Europe/London" \
+        "UTC|UTC"
+    tz="$REPLY_PICK"
 
     part "③ 语言"
     LOCALES="C.UTF-8 $(sed -n 's/^ARG LOCALE_GEN="\(.*\)"$/\1/p' "$SANDBOX_DIR/Dockerfile" 2>/dev/null || true)"
     host_lang="${LANG:-}"
-    info "留空 = 跟随宿主机${host_lang:+(当前 $host_lang)}。镜像内可用:"
-    info "$LOCALES"
     if [[ -n "$host_lang" ]] && ! locale_valid "$host_lang"; then
-        warn "宿主机的 $host_lang 不在列表里,跟随宿主机时容器会回退到 C.UTF-8。"
+        warn "宿主机的 $host_lang 镜像里没有,跟随宿主机时容器会回退到 C.UTF-8。"
     fi
-    while true; do
-        if [[ -n "$CUR_LANG" ]]; then
-            ask_line lang "语言(回车沿用 $CUR_LANG,输入 - 改为跟随宿主机): "
-            [[ -n "$lang" ]] || lang="$CUR_LANG"
-        else
-            ask_line lang "语言(回车跟随宿主机): "
-        fi
-        [[ "$lang" != "-" ]] || lang=""
-        if [[ -z "$lang" ]] || locale_valid "$lang"; then
-            break
-        fi
-        bad "镜像里没有 $lang,请从上面的列表中选择。"
-    done
+    pick "语言" "$CUR_LANG" "语言(locale 名,如 ko_KR.UTF-8;直接回车回到列表): " lang_check \
+        "|跟随宿主机${host_lang:+(当前 $host_lang)}" \
+        "zh_CN.UTF-8|简体中文 zh_CN.UTF-8" \
+        "zh_TW.UTF-8|繁體中文 zh_TW.UTF-8" \
+        "en_US.UTF-8|English en_US.UTF-8" \
+        "ja_JP.UTF-8|日本語 ja_JP.UTF-8" \
+        "C.UTF-8|C.UTF-8(不做本地化)"
+    lang="$REPLY_PICK"
 
-    part "④ Claude Code / Codex 认证"
-    info "1) 账号登录(推荐):首次运行 aibox cc / aibox codex 时按提示在浏览器登录;登录状态保存在 ~/.aibox/,"
-    info "   长期容器和临时容器共用,长期有效"
-    info "2) API key:写进 aibox.conf,每次启动时以环境变量传入容器(按量计费或中转服务)"
+    part "④ 资源(内存 / CPU)"
+    res_ask
+    memory="$REPLY_MEMORY"
+    cpus="$REPLY_CPUS"
+
+    part "⑤ Claude Code / Codex 认证"
+    info "账号登录的状态保存在 ~/.aibox/,长期容器和临时容器共用,长期有效;"
+    info "API key 写进 aibox.conf,每次启动时以环境变量传入容器。"
     NEW_ENV=()
     for entry in "${CUR_ENV[@]+"${CUR_ENV[@]}"}"; do
         if is_managed_env "${entry%%=*}"; then
@@ -1023,14 +1172,16 @@ conf_wizard() {
     done
     def=1
     [[ -z "$removed" ]] || def=2
-    ask_choice choice 2 "$def"
+    ui_menu choice "$def" "怎样认证?" \
+        "账号登录(推荐,首次运行 aibox cc / aibox codex 时在浏览器登录)" \
+        "API key(按量计费或中转服务)"
     if [[ "$choice" == 2 ]]; then
         env_ask secret ANTHROPIC_API_KEY "Claude(Anthropic)API key"
         env_ask plain ANTHROPIC_BASE_URL "Claude API 地址(用中转服务时填写,官方 API 留空)"
         env_ask secret OPENAI_API_KEY "OpenAI API key(Codex 用)"
     elif [[ -n "$removed" ]]; then
         warn "aibox.conf 里已有 $removed;选择账号登录时,CLI 会优先使用环境变量里的 key。"
-        if ! ask_yn "从配置中移除它们?" Y; then
+        if ! ui_yn "从配置中移除它们?" Y; then
             for entry in "${CUR_ENV[@]}"; do
                 if is_managed_env "${entry%%=*}"; then
                     NEW_ENV+=("$entry")
@@ -1044,20 +1195,22 @@ conf_wizard() {
     info "  代理    : $(proxy_label "$proxy")"
     info "  时区    : ${tz:-跟随宿主机}"
     info "  语言    : ${lang:-跟随宿主机}"
+    info "  资源    : $(res_label "$memory" "$cpus")"
     info "  环境变量: $(env_names "${NEW_ENV[@]+"${NEW_ENV[@]}"}")"
     if [[ -f "$CONF" ]]; then
         info "原文件会先备份;其中手写的注释和其他 shell 代码不会带到新文件。"
     fi
-    if ! ask_yn "确认写入?" Y; then
+    if ! ui_yn "确认写入?" Y; then
         info "没有写入,配置保持不变。"
         return 0
     fi
-    conf_write "$proxy" "$tz" "$lang"
+    conf_write "$proxy" "$tz" "$lang" "$memory" "$cpus"
+    (( ! CONF_WRITTEN )) || res_sync "$memory" "$cpus"
 }
 
 step_config() {
     local mode
-    step 5 "运行配置 aibox.conf(代理 / 时区 / 语言 / 认证)"
+    step 5 "运行配置 aibox.conf(代理 / 时区 / 语言 / 资源 / 认证)"
     if [[ ! -f "$CONF_EXAMPLE" ]]; then
         bad "缺少 aibox.conf.example,仓库文件不完整。"
         pending "重新克隆仓库后再运行向导"
@@ -1070,7 +1223,7 @@ step_config() {
             bad "$(tilde "$CONF") 有 Bash 语法错误,aibox 启动时会失败。"
             if (( CHECK_ONLY )); then
                 pending "修正 aibox.conf 的语法错误(或重跑 aibox setup 重新生成)"
-            elif ask_yn "重新生成?(原文件会先备份)" Y; then
+            elif ui_yn "重新生成?(原文件会先备份)" Y; then
                 conf_wizard
             else
                 pending "修正 aibox.conf 的语法错误"
@@ -1085,13 +1238,13 @@ step_config() {
             warn "文件权限为 $mode,本机其他用户也能读取;其中可能有 API key 或代理密码。"
             if (( CHECK_ONLY )); then
                 info "建议执行 chmod 600 $(tilde "$CONF")"
-            elif ask_yn "改为仅自己可读写(chmod 600)?" Y; then
+            elif ui_yn "改为仅自己可读写(chmod 600)?" Y; then
                 chmod 600 "$CONF"
                 ok "已改为 600"
             fi
         fi
     else
-        info "还没有 aibox.conf。全部用默认值(直连、时区和语言跟随宿主机、容器内账号登录)时可以不创建。"
+        info "还没有 aibox.conf。全部用默认值(直连、时区和语言跟随宿主机、内存 8G、容器内账号登录)时可以不创建。"
     fi
 
     if (( CHECK_ONLY )); then
@@ -1099,22 +1252,27 @@ step_config() {
         return 0
     fi
     if [[ -f "$CONF" ]]; then
-        if ask_yn "修改配置?" N; then
+        if ui_yn "修改配置?" N; then
             conf_wizard
         elif [[ -n "$CUR_PROXY" ]]; then
             gost_ensure
         fi
-    elif ask_yn "现在创建配置?" Y; then
+    elif ui_yn "现在创建配置?" Y; then
         conf_wizard
     fi
 }
 
 # ---- 第 6 步:迁移旧版数据 ----
+step_migrate() {
+    step 6 "迁移和清理旧版数据"
+    migrate_legacy
+    leftover_check
+}
+
 # 旧版的 Claude / Codex 状态在仓库 creds/(临时容器)和长期容器机内(/home/<用户>/.claude)。
 # 具体检测和复制由 aibox migrate 完成;这里只判断要不要做,--check 时不为检查去启动长期容器。
-step_migrate() {
+migrate_legacy() {
     local legacy="" entry
-    step 6 "迁移旧版数据(登录状态与配置)"
     if [[ -f "$MIGRATED_MARK" ]]; then
         ok "已完成($(cat "$MIGRATED_MARK"))"
         return 0
@@ -1125,8 +1283,7 @@ step_migrate() {
             break
         fi
     done
-    if container_found && service_running \
-       && container machine list -q 2>/dev/null | grep -qxF "$DEV_MACHINE_NAME"; then
+    if machine_exists; then
         legacy="${legacy:+${legacy}、}已有的长期容器"
     fi
     if [[ -z "$legacy" ]]; then
@@ -1139,13 +1296,51 @@ step_migrate() {
         return 0
     fi
     info "两边都有数据时可以选用长期容器的、临时容器的,或者合并;只复制,原数据保留。"
-    if ask_yn "现在迁移?" Y; then
+    if ui_yn "现在迁移?" Y; then
         if ! bash "$AIBOX" migrate; then
             pending "迁移旧版登录状态与配置:aibox migrate"
         fi
     else
         info "下次启动 aibox 时也会再问。"
         pending "迁移旧版登录状态与配置:aibox migrate"
+    fi
+}
+
+# 旧版支持的 JDK / Maven 包和临时容器的 Gradle 缓存,新版已不再使用。只列出、询问后删除;
+# 宿主机的 ~/.m2/repository 是 Maven 自己的目录,不属于 aibox,不碰。
+leftover_check() {
+    local path found=() size
+    for path in "$STATE_DIR/third_party/jdk8.tar.gz" "$STATE_DIR/third_party/maven.tar.gz" \
+                "$STATE_DIR/cache/gradle" \
+                "$SANDBOX_DIR/third_party/jdk8.tar.gz" "$SANDBOX_DIR/third_party/maven.tar.gz" \
+                "$SANDBOX_DIR/cache/gradle"; do
+        [[ -e "$path" ]] && found+=("$path")
+    done
+    (( ${#found[@]} )) || return 0
+    warn "以下是旧版的 JDK / Maven 组件或 Gradle 缓存,新版已不再使用:"
+    for path in "${found[@]}"; do
+        size="$(trim "$(du -sh "$path" 2>/dev/null | cut -f1)")"
+        info "  $(tilde "$path")${size:+($size)}"
+    done
+    if (( CHECK_ONLY )); then
+        info "确认无用后可以删除,或重跑 aibox setup 时选择删除。"
+        return 0
+    fi
+    if container_found && container ls -q 2>/dev/null | grep -q '^aibox-'; then
+        info "有临时容器在运行,可能还挂着 Gradle 缓存;先 aibox tmp stop --all,再重跑向导删除。"
+        return 0
+    fi
+    if ui_yn "删除它们?" N; then
+        for path in "${found[@]}"; do
+            rm -rf -- "$path"
+        done
+        # 只剩 Finder 留下的 .DS_Store 时连目录一起删
+        for path in "$STATE_DIR/cache" "$SANDBOX_DIR/cache"; do
+            [[ -d "$path" ]] || continue
+            rm -f -- "$path/.DS_Store"
+            rmdir -- "$path" 2>/dev/null || true
+        done
+        ok "已删除"
     fi
 }
 
@@ -1163,7 +1358,7 @@ run_build() {
         bad "$desc 失败。常见原因:"
         info "· 报 -9816 或 server closed session:运行 container builder delete --force 后重试"
         info "· 下载超时:构建不经过 aibox.conf 里的代理,网络受限时可开启代理软件的 TUN 模式后重试"
-        if ! ask_yn "重试?" Y; then
+        if ! ui_yn "重试?" Y; then
             pending "$desc:aibox $*"
             return 1
         fi
@@ -1196,7 +1391,7 @@ step_build() {
     fi
     info "aibox build 会依次构建基础镜像和长期容器镜像,需要联网下载 node:22-bookworm、系统包和"
     info "Claude Code / Codex,首次通常需要 5~15 分钟。"
-    if ask_yn "现在构建?" Y; then
+    if ui_yn "现在构建?" Y; then
         run_build "构建镜像" build || true
     else
         pending "构建镜像:aibox build"
@@ -1216,7 +1411,7 @@ step_clip() {
         info "未启用。需要时运行 aibox clip install。"
         return 0
     fi
-    if ask_yn "启用?" N; then
+    if ui_yn "启用?" N; then
         if bash "$AIBOX" clip install; then
             ok "已启用"
         else

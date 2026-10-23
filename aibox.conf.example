@@ -9,7 +9,7 @@
 # aibox.conf 可能包含 API key、代理账密等秘密，已由 .gitignore / .dockerignore 排除。
 # 不要提交该文件，也不要把其中内容粘贴到 Issue 或日志中。
 #
-# 对代理、时区和语言，只有非空的同名环境变量会覆盖这里。例如
+# 对代理、时区、语言和资源，只有非空的同名环境变量会覆盖这里。例如
 # AIBOX_TZ=UTC aibox 只影响一次运行；导出空环境变量不能清除这里的非空值。
 # AIBOX_ENV_VARS 只从本文件读取，完整语义见 README.md。
 
@@ -34,6 +34,16 @@ AIBOX_TZ=""
 # 非空值必须是 Dockerfile 的 LOCALE_GEN 已生成的 locale，例如：
 # en_US.UTF-8、en_GB.UTF-8、zh_CN.UTF-8、zh_TW.UTF-8 或 ja_JP.UTF-8。
 AIBOX_LANG=""
+
+# ---- 资源（可选）----
+# 临时容器每次启动时使用；长期容器只在首次创建时使用，创建后用
+# aibox set memory=<大小> cpus=<核数> 调整（aibox setup 修改这里时会顺带询问）。
+# 内存：空值 = 8192M。非空值必须带单位 M 或 G，例如 8G、16G、4096M。
+#   Mac 按需给虚拟机分配内存，设大一些不会立刻占满宿主机内存。
+# CPU：空值 = container 的默认值（临时容器 4 核，长期容器为宿主核数的一半）。
+#   非空值为正整数。
+AIBOX_MEMORY=""
+AIBOX_CPUS=""
 
 # ---- 自定义容器环境变量（可选）----
 # 每项必须是完整的 NAME=value，名称须匹配 [A-Za-z_][A-Za-z0-9_]*。

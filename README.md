@@ -13,14 +13,14 @@
 - 一条 `aibox` 命令进入 shell，或直接启动 `claude` / `codex`。
 - 默认的长期容器固定名为 `aibox-dev`，不绑定单个项目，可在其中处理 Home 下的多个项目、安装长期保留的软件；服务未启动时自动启动。
 - `aibox tmp` 为每个终端会话创建独立的 `--rm` 临时容器，只挂载指定项目，支持多个项目并行运行。
-- Claude/Codex 登录状态保存在宿主机 `~/.aibox/`，两种容器共用，与 Mac 本机 CLI 的 `~/.claude`、`~/.codex` 分离；项目文件及构建缓存按明确规则持久化。
+- Claude/Codex 登录状态保存在宿主机 `~/.aibox/`，两种容器共用，与 Mac 本机 CLI 的 `~/.claude`、`~/.codex` 分离；项目文件按明确规则持久化。
 - 默认直连；配置 gost 上游代理时，临时容器启用 IPv4/IPv6 出口防火墙，禁止其他进程绕过代理直连。
 - 时区和 locale 可跟随宿主机，也可逐次或通过配置文件指定。
 - 镜像默认安装 `ai-ipcheck`，可直接使用 `ipcheck` 诊断容器网络环境。
 - 提供临时容器的列表、进入、停止、日志，以及状态自检、CLI 更新和 Tab 补全。
 - `aibox clip install` 启用剪贴板图片桥接，沙箱内的 Claude Code 可用 Ctrl+V 直接粘贴宿主机剪贴板里的图片。
-- 配置、登录状态、可选组件和缓存都放在 `~/.aibox/`，程序目录（git 克隆）只读、可整体替换。
-- `~/.aibox/third_party/` 中的 gost、JDK 8 和 Maven 均为独立可选组件。
+- 配置、登录状态和可选组件都放在 `~/.aibox/`，程序目录（git 克隆）只读、可整体替换。
+- 镜像不内置 JDK、Maven 等语言工具链，定位是通用的 AI CLI 沙箱；需要时在长期容器里自行安装（系统盘长期保留）。
 
 ## 兼容性
 
@@ -31,7 +31,7 @@
 | 容器运行时 | [Apple container](https://github.com/apple/container)（已验证 1.6.0，最低要求 1.0.0；不是 Docker） |
 | 宿主脚本 | 兼容 macOS 自带 Bash 3.2；日常可从 zsh 调用 |
 | 容器架构 | Linux ARM64，基础镜像为 `node:22-bookworm` |
-| VM 内存 | 临时容器和长期容器默认均为 `8192M`；临时容器可在 `ai-box` 的 `MEMORY` 中调整，长期容器的 `DEV_MEMORY` 只在首次创建时使用，之后用 `aibox set memory=...` 调整 |
+| VM 资源 | 内存默认均为 `8192M`，CPU 默认由 container 决定（临时容器 4 核，长期容器为宿主核数的一半）；在 `aibox.conf` 的 `AIBOX_MEMORY` / `AIBOX_CPUS` 中调整，见「运行期配置」 |
 
 `aibox` 只在 macOS 上以普通用户身份运行：在 Linux（包括长期容器内部）或用 `sudo` / root 运行时会直接报错退出，因为这时的 `$HOME` 不是 Mac 用户的 Home，读写 `~/.aibox` 会把用户数据写到错误的位置；`aibox help` 和 `aibox --version` 不受此限制。
 
@@ -56,14 +56,14 @@ cd ai-sandbox
 ./setup.sh
 ```
 
-向导会逐步检查并完成下面几件事。每一步先检测现状，已完成的自动跳过，所以可以随时中断、反复运行：
+向导会逐步检查并完成下面几件事。每一步先检测现状，已完成的自动跳过，所以可以随时中断、反复运行。选择题用 ↑↓ 选、回车确认（是 / 否也可以直接按 y、n）；时区、语言、内存、CPU 列出常用选项，最后一项「手动输入…」可以填列表外的值：
 
-1. 检查 Mac 环境：Apple silicon 与 macOS 26。
+1. 检查 Mac 环境：Apple silicon 与 macOS 26，并显示本机内存和 CPU 核数；内存不到 16G 时提示第 5 步可以调小容器内存。
 2. 安装 Apple container：可自动下载已验证版本（当前为 1.6.0）的官方安装包，核对 Apple 签名后打开系统安装器；也可以只打开下载页。已安装时检查版本：低于最低要求会提示升级，高于已验证版本只提示「未经验证」。
 3. 启动 container 服务；首次启动会下载 Apple 推荐的默认 Linux 内核。
 4. 安装 `aibox` 命令：git 克隆时在 `~/.local/bin` 创建软链，按需把该目录加入 `PATH`；Homebrew 安装时由 brew 提供命令，向导只检查有没有被之前 git 克隆留下的 `~/.local/bin/aibox` 挡住，有就提议删除。然后启用 Tab 补全（写入 `~/.zshrc`，bash 用户为 `~/.bash_profile`；Homebrew 安装使用不随版本变化的 `opt/aibox` 路径）；已有指向别处的补全行会被注释掉，不会删除。
-5. 生成 `~/.aibox/aibox.conf`（权限 `600`）：代理、时区、语言和认证方式（容器内账号登录或 API key）。选择代理时会校验地址格式，把 `127.0.0.1` 这类容器内不可达的地址换成宿主机在容器网络中的地址，可自动下载 gost 并按下文记录的 SHA-256 校验，还可以测试代理能否访问 Claude API。已有配置时默认保留；修改会先备份原文件，并保留 `AIBOX_ENV_VARS` 中与认证无关的条目。
-6. 迁移旧版数据：发现旧版留下的登录状态和配置时，选择用长期容器的、临时容器的或合并（详见「认证」一节）。旧版放在程序目录里的 `aibox.conf`、`third_party/` 文件和 Gradle 缓存会在第 1 步之后自动移到 `~/.aibox/`（见「用户数据目录」）。
+5. 生成 `~/.aibox/aibox.conf`（权限 `600`）：代理、时区、语言、资源（内存 / CPU，不能超过本机）和认证方式（容器内账号登录或 API key）。选择代理时会校验地址格式，把 `127.0.0.1` 这类容器内不可达的地址换成宿主机在容器网络中的地址，可自动下载 gost 并按下文记录的 SHA-256 校验，还可以测试代理能否访问 Claude API。已有配置时默认保留；修改会先备份原文件，并保留 `AIBOX_ENV_VARS` 中与认证无关的条目。改了资源且长期容器已经创建时，会询问是否用 `aibox set` 同步过去（`aibox restart` 后生效）。
+6. 迁移和清理旧版数据：发现旧版留下的登录状态和配置时，选择用长期容器的、临时容器的或合并（详见「认证」一节）。旧版放在程序目录里的 `aibox.conf` 和 `third_party/gost` 会在第 1 步之后自动移到 `~/.aibox/`（见「用户数据目录」）。旧版的 `jdk8.tar.gz`、`maven.tar.gz` 和 Gradle 缓存（`~/.aibox/cache/gradle` 或程序目录里的 `cache/gradle`）已不再使用，向导会列出大小并询问是否删除（默认不删）。
 7. 构建镜像：两个镜像 `ai-sandbox:latest`（基础镜像，临时容器使用）和 `ai-sandbox-dev:latest`（长期容器镜像）都需要，缺任一个就运行 `aibox build` 依次构建。
 8. 可选启用剪贴板贴图。
 
@@ -172,14 +172,13 @@ chmod 600 ~/.aibox/aibox.conf
 
 ## 用户数据目录
 
-程序目录（git 克隆，将来也可能是 Homebrew 安装目录）只放程序文件，按只读、可整体替换对待。配置、登录状态、可选组件和缓存都在宿主机的 `~/.aibox/`（权限 `700`）：
+程序目录（git 克隆或 Homebrew 安装目录）只放程序文件，按只读、可整体替换对待。配置、登录状态和可选组件都在宿主机的 `~/.aibox/`（权限 `700`）：
 
 | 路径 | 内容 |
 |---|---|
 | `claude/`、`codex/` | Claude / Codex 登录状态和配置，两种容器共用（见「认证」） |
 | `aibox.conf` | 运行期配置，`aibox setup` 生成，权限 `600` |
-| `third_party/` | 可选的 `gost`、`jdk8.tar.gz`、`maven.tar.gz`（见「可选的 third_party 组件」） |
-| `cache/gradle/` | 临时容器的 Gradle 缓存 |
+| `third_party/` | 可选的 `gost`（见「可选的 third_party 组件」） |
 | `versions.env` | `aibox tmp update` 确认升级过的 CLI 版本（见「更新」） |
 | `machine/` | 每次启动长期容器前暂存的辅助脚本，由启动器自动维护 |
 | `clipboard/` | `aibox clip install` 复制过来的剪贴板监听脚本 |
@@ -188,9 +187,8 @@ chmod 600 ~/.aibox/aibox.conf
 从把这些文件放在程序目录里的旧版升级时，新版首次运行 `aibox` 的命令或安装向导时会自动搬迁（只读的 `help`、`--version` 和 `setup --check` 除外），新位置已有的文件绝不覆盖：
 
 - `<程序目录>/aibox.conf` 移到 `~/.aibox/aibox.conf`，原处留一个指向新位置的软链接，照旧编辑旧路径也能生效。两处都有且内容不同时，旧文件不再读取，每次运行都会给出提示，确认无用后删除即可。
-- `<程序目录>/third_party/` 中的 `gost`、`jdk8.tar.gz`、`maven.tar.gz` 移到 `~/.aibox/third_party/`。
-- `<程序目录>/cache/gradle` 移到 `~/.aibox/cache/gradle`；有临时容器在运行时暂不搬迁，留到之后的某次运行。
-- `third_party` 文件或 Gradle 缓存在新旧两处都有时，生效的是 `~/.aibox` 里的那份，旧位置的不再使用，每次运行都会提示，确认无用后删除即可。
+- `<程序目录>/third_party/gost` 移到 `~/.aibox/third_party/gost`。两处都有时生效的是 `~/.aibox` 里的那份，旧位置的不再使用，每次运行都会提示，确认无用后删除即可。
+- 旧版的 `jdk8.tar.gz`、`maven.tar.gz` 和 Gradle 缓存不再搬迁，由 `aibox setup` 询问是否删除。
 - 旧版 `aibox tmp update` 改写过的 `Dockerfile`：若 git 克隆里 `Dockerfile` 的本地改动只有 `ARG CLAUDE_CODE_VERSION=` 与 `ARG CODEX_VERSION=` 这两行，就把版本记进 `~/.aibox/versions.env` 并用 git 还原 `Dockerfile`，之后 `git pull` 不会再因此冲突；有其他本地改动时保持原样，不做处理。
 
 ## 运行期配置
@@ -201,22 +199,33 @@ chmod 600 ~/.aibox/aibox.conf
 AIBOX_PROXY=""  # 空值为直连；非空示例见 aibox.conf.example
 AIBOX_TZ=""     # 空值跟随宿主机时区
 AIBOX_LANG=""   # 空值跟随宿主机 LANG
+AIBOX_MEMORY="" # 容器内存，如 16G；空值为 8192M
+AIBOX_CPUS=""   # 容器 CPU 核数；空值由 container 决定
 AIBOX_ENV_VARS=( # 传入容器的自定义环境变量
   'EXAMPLE_NAME=value with spaces'
 )
 ```
 
-前三个标量配置的实际优先级与空值语义如下：
+标量配置的实际优先级与空值语义如下：
 
 | 配置 | 优先级 |
 |---|---|
 | `AIBOX_PROXY` | 非空环境变量 > 非空 `aibox.conf` > 旧版 `FIXED_SOCKS_*` 兼容值（仅配置文件不存在时） > 直连 |
 | `AIBOX_TZ` | 非空环境变量 > 非空 `aibox.conf` > 宿主机时区 > 镜像默认 `UTC` |
 | `AIBOX_LANG` | 非空环境变量 > 非空 `aibox.conf` > 宿主机 `LANG` > 镜像默认 `C.UTF-8` |
+| `AIBOX_MEMORY` | 非空环境变量 > 非空 `aibox.conf` > `8192M` |
+| `AIBOX_CPUS` | 非空环境变量 > 非空 `aibox.conf` > container 默认（临时容器 4 核，长期容器为宿主核数的一半） |
 
 例如 `AIBOX_TZ=UTC aibox` 只覆盖本次运行。脚本只把“非空环境变量”视为覆盖值，因此 `AIBOX_PROXY="" aibox` 不能清除配置文件中的非空代理；要切回直连，请把 `aibox.conf` 中的 `AIBOX_PROXY` 设为空。时区和语言同理，空值表示继续向后回退，而不是强制空值。
 
 `AIBOX_LANG` 必须是镜像已生成的 locale。默认集合见 `Dockerfile` 的 `LOCALE_GEN`；加入其他 locale 后需重新运行 `aibox build`。
+
+资源配置的生效时机：
+
+- 临时容器每次启动时使用 `AIBOX_MEMORY` / `AIBOX_CPUS`，例如 `AIBOX_MEMORY=16G aibox tmp` 只影响这一次。
+- 长期容器只在首次创建时使用它们；之后资源保存在长期容器自身的配置里，用 `aibox set memory=16G cpus=6` 调整，`aibox restart` 后生效。`aibox setup` 修改资源时会顺带询问是否同步。`aibox status` 同时显示配置里的值和长期容器的实际值。
+- 内存必须带单位 `M` 或 `G`（如 `8G`、`4096M`），CPU 为正整数；格式不对时 `aibox` 直接报错，不启动容器。Mac 按需给虚拟机分配内存，设大一些不会立刻占满宿主机内存。
+- Apple container 的虚拟机里 `nproc` 会比设置的核数多 1（例如 `--cpus 2` 时显示 3），这是 container 自身的行为。
 
 `AIBOX_ENV_VARS` 只从 `aibox.conf` 读取。它是在文件中声明的 Bash 数组，每项为一个完整的 `NAME=value`：
 
@@ -236,29 +245,25 @@ AIBOX_ENV_VARS=(
 
 ## 可选的 third_party 组件
 
-`~/.aibox/third_party/` 用于在构建网络受限时提供本地包，目录不存在时自行创建。构建只识别下面三个精确文件名，三者彼此独立；缺少的组件不会安装，其他文件会被忽略。目录为空或不存在时也可以构建包含 Claude Code 和 Codex 的核心镜像。
+`~/.aibox/third_party/` 用于放本地提供的组件，目录不存在时自行创建。构建只识别 `gost` 这一个文件名，其他文件会被忽略（旧版支持的 `jdk8.tar.gz`、`maven.tar.gz` 已不再安装）。目录为空或不存在时也可以构建包含 Claude Code 和 Codex 的核心镜像。
 
 | 文件名 | 安装结果 | 已验证版本 | 官方来源 | 许可证 |
 |---|---|---|---|---|
 | `gost` | `/usr/local/bin/gost`，为上游代理提供本地 HTTP 入口 | gost 3.2.6，Linux ARM64 | [go-gost releases](https://github.com/go-gost/gost/releases) | MIT |
-| `jdk8.tar.gz` | `/opt/java/jdk8`，设置 `JAVA_HOME` 和 `PATH` | Eclipse Temurin 8u492-b09，Linux AArch64 JDK | [Adoptium Temurin 8](https://adoptium.net/temurin/releases/?version=8) | GPL-2.0 with Classpath Exception |
-| `maven.tar.gz` | `/opt/maven`，设置 `MAVEN_HOME` 和 `PATH` | Apache Maven 3.9.16 binary tarball | [Apache Maven downloads](https://maven.apache.org/download.cgi) | Apache-2.0 |
 
-当前已验证资产的 SHA-256：
+当前已验证版本的 SHA-256（`aibox setup` 自动下载时也按它校验）：
 
 ```text
 343c3e003996ca0437b9cc47dd1500cd0475ba09f5a5f17e50851854e06a1ca7  gost
-3c2253b986909c20f79d6de7a0cb957f89c243df57615897836046e24d2e5257  jdk8.tar.gz
-80ffca22aed9e8b9713a232f3394fd81d7f20322df75efdb2b047dbd3e3a23bb  maven.tar.gz
 ```
 
-请从官方来源下载 Linux ARM64 版本，在放入目录前核对发布方校验值及许可证。构建时 `ai-box` 在临时目录里组装构建上下文：程序文件按程序目录中 `.dockerignore` 的白名单复制，`third_party/` 只取 `~/.aibox/third_party/` 里这三个文件（APFS 上尽量用 `cp -c` 写时复制克隆，大文件不额外占时间和空间），构建结束后删除临时目录。程序目录和 `~/.aibox` 里的其他内容（配置、登录状态、缓存）都不会进入构建。Dockerfile 会把识别到的 gost 安装为可执行文件：
+手动放入时请从官方来源下载 Linux ARM64 版本，核对发布方校验值及许可证。构建时 `ai-box` 在临时目录里组装构建上下文：程序文件按程序目录中 `.dockerignore` 的白名单复制，`third_party/` 只取 `~/.aibox/third_party/gost`，构建结束后删除临时目录。程序目录和 `~/.aibox` 里的其他内容（配置、登录状态）都不会进入构建。Dockerfile 会把 gost 安装为可执行文件：
 
 ```bash
 aibox build
 ```
 
-新增或替换任何已识别组件后都需要重建镜像。例外是 gost：已有的长期容器每次启动会把 `~/.aibox/third_party/gost` 同步进系统盘，无需重建；临时容器仍要重建镜像才能用上。若配置了 `AIBOX_PROXY` 但容器里没有 gost，容器会明确拒绝启动；请放入 gost 后重建，或关闭代理。Maven 可以在没有本地 JDK 的情况下单独安装，但运行 `mvn` 时仍需另行提供 Java 运行时。
+已有的长期容器每次启动会把 `~/.aibox/third_party/gost` 同步进系统盘，无需重建；临时容器要重建镜像才能用上新放入或替换的 gost。若配置了 `AIBOX_PROXY` 但容器里没有 gost，容器会明确拒绝启动；请放入 gost 后重建，或关闭代理。
 
 这些本地资产不属于本项目许可证。重新分发前请保留归档内的 `LICENSE`、`NOTICE` 等文件，并自行确认相应许可证义务。
 
@@ -333,18 +338,16 @@ Claude 按工作目录的绝对路径区分项目状态：临时容器里是 `/w
 | 选定的项目目录 | `/workspace/<项目名>` | 项目读写 |
 | `~/.aibox/claude` | `/home/node/.claude` | Claude 登录、配置及项目状态（与长期容器共用） |
 | `~/.aibox/codex` | `/home/node/.codex` | Codex 登录及配置（与长期容器共用） |
-| `~/.m2/repository` | `/home/node/.m2/repository` | Maven 依赖缓存 |
-| `~/.aibox/cache/gradle` | `/home/node/.gradle` | Linux 专用 Gradle 缓存和配置 |
 | `<程序目录>/entrypoint.sh` 的启动时快照（位于宿主机临时目录） | `/usr/local/bin/entrypoint.sh` | 只读的运行期入口脚本 |
 | `~/.clipboard-bridge`（仅启用剪贴板桥接时） | `/run/aibox/clipboard-bridge` | 只读的剪贴板图片 |
 
-除只读的两项外，这些目录用于持久化读写。容器中的 AI 工具及其子进程能够读取或修改它们，项目文件的修改会立即反映到宿主机。不要为不可信代码挂载含敏感内容的项目，也不要把秘密放进 Maven/Gradle 缓存。
+除只读的两项外，这些目录用于持久化读写。容器中的 AI 工具及其子进程能够读取或修改它们，项目文件的修改会立即反映到宿主机。不要为不可信代码挂载含敏感内容的项目。
 
 此外还应了解：
 
 - `AIBOX_ENV_VARS` 中的值不会放入 `container` CLI 参数或导出到宿主启动器环境；它们会短暂存放在权限为 `0600`、只读挂载并由 `ai-box` 清理的宿主机临时 env-file 中，只在入口降权后导出给用户命令。
 - 用户命令以 `node` 运行。直连模式保留容器内免密 `sudo`；代理模式会撤销 sudo、清空 capability 并启用 `no_new_privs`，避免防火墙被绕过。
-- `--rm` 只删除临时容器文件系统，不删除项目、登录状态和缓存。
+- `--rm` 只删除临时容器文件系统，不删除项目和登录状态。
 - 项目名取自目录 basename；不同路径下的同名项目会得到相同容器工作路径，并可能共享 Claude 的项目状态。需要严格隔离时请使用不同目录名。
 - 容器降低误触宿主机其他路径的风险，但不能替代代码审查、最小权限、秘密管理或容器运行时安全更新。
 
@@ -366,7 +369,7 @@ aibox restart                         # 重启并刷新代理服务
 aibox exec <command> [args...]        # 以普通用户在长期容器内执行命令
 aibox update [cc|codex]               # 检查机内 CLI 新版，确认后更新
 aibox version [cc|codex]              # 查看机内实际安装的 CLI 版本
-aibox set memory=8G cpus=4            # 调整资源，restart 后生效
+aibox set memory=8G cpus=4            # 调整已创建的长期容器的资源，restart 后生效
 aibox stop                            # 停止，保留系统盘
 aibox logs [-f]                       # 查看日志
 aibox delete                          # 确认后删除长期容器及系统盘；别名 rm
@@ -434,17 +437,14 @@ aibox clip status      # 应显示「有图可粘」
 
 监听**只镜像图片，不镜像剪贴板文本**，避免密码等敏感文本落盘。原理、架构图与排错见 [`clipboard-bridge/README.md`](clipboard-bridge/README.md)。
 
-## Java 与构建缓存
+## 开发工具链
 
-Java 支持完全可选：
+镜像只内置 Claude Code、Codex 及其运行所需的 Node.js、Python、git 等基础工具，不内置 JDK、Maven、Gradle 等语言工具链。需要时：
 
-- 放入 `jdk8.tar.gz` 后提供 `java`、`javac` 和 `JAVA_HOME`。
-- 放入 `maven.tar.gz` 后提供 `mvn` 和 `MAVEN_HOME`；Maven 自身仍需要 JDK。
-- Gradle 不内置发行版，项目可使用 `./gradlew`；它同样需要可用的 JDK。
+- 长期容器：系统盘长期保留，在机内用 `sudo apt-get install openjdk-17-jdk maven` 之类的命令自行安装，之后一直可用。删除长期容器（`aibox delete`）会连同装过的软件一起删除。
+- 临时容器：用完即删，装的软件不会保留；需要固定工具链的项目建议用长期容器。
 
-临时容器的 Maven 仓库从宿主机 `~/.m2/repository` 挂载，宿主机与容器同时写入时可能发生并发冲突。Gradle 使用独立的 `~/.aibox/cache/gradle/`，避免 macOS 与 Linux 共用平台相关缓存。即使未安装 JDK 或 Maven，这两个缓存挂载仍会创建，不影响核心 CLI。长期容器没有这两个专门挂载，Maven / Gradle 使用机内用户自己的目录（位于系统盘）。
-
-启用代理时，临时容器的入口脚本会为 Gradle 添加带标记的代理配置块；Maven 的 `settings.xml` 不存在或原本由 ai-box 管理时，才会写入代理配置，不覆盖用户自有的文件。切回直连后，入口脚本只移除自己管理的内容并保留其他配置。普通 Java 程序通常不读取 `HTTP_PROXY`；代理模式下直连会被防火墙拒绝，需要显式传入 JVM 参数：
+代理模式下临时容器的防火墙只放行经本地代理的连接。遵循 `HTTP_PROXY` 等环境变量的程序可以直接使用；Java、Maven、Gradle 等不读这些变量的工具需要自行配置代理（地址 `127.0.0.1:8080`），例如：
 
 ```bash
 java -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8080 \
@@ -490,7 +490,7 @@ aibox tmp update codex     # 仅 Codex
 
 重建与同步规则：
 
-- 修改 `Dockerfile`、`network-lockdown.sh`、`LOCALE_GEN` 或 `~/.aibox/third_party/` 中已识别的文件后运行 `aibox build`（依次构建基础镜像和长期容器镜像）；只用临时容器时 `aibox tmp build` 即可。
+- 修改 `Dockerfile`、`network-lockdown.sh`、`LOCALE_GEN` 或 `~/.aibox/third_party/gost` 后运行 `aibox build`（依次构建基础镜像和长期容器镜像）；只用临时容器时 `aibox tmp build` 即可。
 - `aibox build` 不会替换已创建的长期容器：它继续使用自己的系统盘。要整体换用新镜像（例如修改了 `Dockerfile.dev`），先备份系统盘里需要保留的内容，再 `aibox delete` 并运行 `aibox` 重新创建。宿主 Home 中的文件不会随长期容器删除。
 - 每次启动长期容器时，启动器先把程序目录里的辅助脚本（`dev-profile.sh`、`dev-shell.sh`、`dev-configure.sh`、`dev-proxy-run.sh`、`dev-tools.sh`、`aibox-dev-proxy.service`）复制到 `~/.aibox/machine/`，再以 root 从那里连同 `~/.aibox/third_party/gost` 同步进已有的长期容器，因此更新 aibox 或修改这些文件后无需重建，下次启动即生效；程序目录放在哪里都不影响。
 - 修改 `~/.aibox/aibox.conf` 或宿主端 `ai-box` 后下次启动即可生效；普通 `entrypoint.sh` 修改也会通过快照对临时容器生效，但涉及镜像工具、用户或权限模型时仍须全量重建。
@@ -517,8 +517,9 @@ aibox tmp update codex     # 仅 Codex
 | 提示缺少强制代理组件或防火墙初始化失败 | 运行 `aibox build` 全量重建；仍失败时检查 Apple container 是否接受启动器传入的 `CAP_NET_ADMIN`；可用 `aibox tmp logs <目标>` 看启动日志 |
 | `socks5://` 下域名解析失败 | 尝试 `socks5h://`，让上游解析域名 |
 | locale 回退到 `C.UTF-8` | 将 locale 加入 `LOCALE_GEN` 后重建 |
-| `mvn` 提示找不到 Java | 同时提供 `jdk8.tar.gz`，或自行安装兼容 JDK |
-| 长会话卡顿或被 OOM 终止 | 结束并恢复会话；临时容器按主机容量调整 `MEMORY`，长期容器用 `aibox set memory=...` 后 `aibox restart` |
+| 升级后 `java` / `mvn` 不见了 | 镜像不再内置 JDK / Maven，见「开发工具链」；已有长期容器里旧镜像带来的 `/opt/java`、`/opt/maven` 还在，但不再自动加入 `PATH` |
+| 长会话卡顿或被 OOM 终止 | 结束并恢复会话；临时容器调大 `aibox.conf` 的 `AIBOX_MEMORY`，长期容器用 `aibox set memory=...` 后 `aibox restart` |
+| `aibox` 报 `AIBOX_MEMORY` 或 `AIBOX_CPUS` 格式不对 | 内存写成带单位的 `8G` / `4096M`，CPU 写正整数；或重跑 `aibox setup` 重新生成 |
 | 同名项目的 Claude 状态混合 | 使用不同的目录 basename |
 | 构建无法下载 APT/PyPI/npm 依赖 | 检查 builder 网络和 DNS；本地三方包不会替代这些在线依赖 |
 | 挂载的项目目录在临时容器内为空 | Apple container 的单文件挂载会连带共享其父目录；父目录若同时是另一挂载的源（如挂载沙箱仓库自身时的 `entrypoint.sh`），该目录会静默挂空。`ai-box` 已改挂 entrypoint 启动时快照规避；仍出现则更新宿主端 `ai-box` 或重启 container 服务 |
@@ -535,7 +536,7 @@ shellcheck ai-box setup.sh entrypoint.sh ai-box-completion.sh  # 已安装 Shell
 aibox build                                          # 有 Apple container 环境时；依次构建基础镜像和长期容器镜像
 ```
 
-可选组件相关改动应额外验证空的 `~/.aibox/third_party/`、单独每个组件及所需组合。涉及用户行为时，请同步更新中文和英文 README。普通缺陷和功能请求请通过 GitHub Issues 提交，并附上脱敏后的 macOS、Apple container、`aibox status` 和复现信息。
+可选组件相关改动应额外验证空的 `~/.aibox/third_party/` 和只放 gost 两种情况。涉及用户行为时，请同步更新中文和英文 README。普通缺陷和功能请求请通过 GitHub Issues 提交，并附上脱敏后的 macOS、Apple container、`aibox status` 和复现信息。
 
 安全漏洞请优先使用仓库的 GitHub Security Advisory 私密报告入口。若该入口尚未启用，只提交不含利用细节和秘密的最小公开 Issue，请维护者建立私密沟通渠道；不要公开有效凭据、代理账号或未修复漏洞细节。
 
@@ -553,8 +554,8 @@ container image delete ai-sandbox-dev:latest
 rm "$HOME/.local/bin/aibox"
 ```
 
-最后删除克隆目录。配置、登录状态、`third_party/` 组件和 Gradle 缓存都在宿主 `~/.aibox`，不随克隆目录删除；要彻底移除，先备份需要保留的内容（例如 `aibox.conf` 和登录状态），再执行 `rm -rf ~/.aibox`。宿主机的 `~/.m2/repository` 不属于本项目，不会被删除。若 shell 配置中加入了补全或 `PATH` 行，也请一并移除。
+最后删除克隆目录。配置、登录状态和 `third_party/` 组件都在宿主 `~/.aibox`，不随克隆目录删除；要彻底移除，先备份需要保留的内容（例如 `aibox.conf` 和登录状态），再执行 `rm -rf ~/.aibox`。若 shell 配置中加入了补全或 `PATH` 行，也请一并移除。
 
 ## 许可证与第三方软件
 
-本项目代码按 [MIT License](LICENSE) 发布。可选的 gost、Temurin 和 Maven，以及基础镜像、系统包、Claude Code、Codex CLI 和 `ai-ipcheck`，均由各自作者按各自许可证或服务条款提供，不因本仓库的 MIT License 而改变。下载、使用或重新分发前，请查阅上游许可、NOTICE 和条款。
+本项目代码按 [MIT License](LICENSE) 发布。可选的 gost，以及基础镜像、系统包、Claude Code、Codex CLI 和 `ai-ipcheck`，均由各自作者按各自许可证或服务条款提供，不因本仓库的 MIT License 而改变。下载、使用或重新分发前，请查阅上游许可、NOTICE 和条款。

@@ -4,6 +4,38 @@
 
 `aibox --version` 显示当前安装的版本。
 
+## [0.3.1] - 2026-10-23
+
+aibox 定位为通用的 AI CLI 沙箱：镜像不再内置 JDK / Maven，临时容器不再挂载 Maven / Gradle 缓存。安装向导新增容器资源（内存 / CPU）配置，并能清理旧版留下的 JDK、Maven 包和 Gradle 缓存。
+
+English summary: aibox is now a general-purpose AI CLI sandbox. The image no longer installs the optional JDK 8 / Maven archives, and temporary containers no longer mount `~/.m2/repository` or a Gradle cache. New `AIBOX_MEMORY` / `AIBOX_CPUS` settings in `aibox.conf` control container resources (every temporary container, and the persistent container when it is first created); the setup wizard asks for them, checks them against the Mac, and offers to apply changes to an existing persistent container with `aibox set`. The wizard also offers to delete the old JDK / Maven archives and Gradle cache, and its questions are now arrow-key menus, with common values plus a manual-entry item for time zone, language, memory and CPU. The confirmations and choices in `aibox` itself use the same menus (shared `aibox-ui.sh`); piped input still takes numbers and y/n.
+
+### 升级须知
+
+- **镜像不再内置 JDK / Maven**：下次 `aibox build` 后，新镜像里没有 `/opt/java/jdk8`、`/opt/maven`。已创建的长期容器继续用自己的系统盘，旧镜像带来的这两个目录还在，但不再自动设置 `JAVA_HOME` / `MAVEN_HOME`、不再加入 `PATH`。需要 Java 时在长期容器里用 `sudo apt-get install` 安装（见 README「开发工具链」）。
+- **临时容器不再挂载 Maven / Gradle 缓存**：宿主机的 `~/.m2/repository` 不再挂进去；`~/.aibox/cache/gradle` 不再使用。代理模式下也不再自动生成 Maven `settings.xml` / Gradle `gradle.properties` 里的代理配置。
+- **旧文件可以清理**：`~/.aibox/third_party/` 里的 `jdk8.tar.gz`、`maven.tar.gz`，以及 `~/.aibox/cache/gradle` 都不再使用。运行一次 `aibox setup`，第 6 步会列出它们的大小并询问是否删除（默认不删）。
+- 资源默认值不变（内存 8192M，CPU 由 container 决定），不配置就和以前一样。
+- 不重建镜像也能用；重建后镜像会小一些。
+
+### 新增
+
+- `aibox.conf` 新增 `AIBOX_MEMORY`、`AIBOX_CPUS`，同名的非空环境变量可以临时覆盖。临时容器每次启动时使用；长期容器只在首次创建时使用，之后仍用 `aibox set` 调整。格式不对时直接报错，不启动容器。
+- 安装向导第 1 步显示本机内存和 CPU 核数；第 5 步新增「资源」一节，不允许超过本机，修改后如果长期容器已存在，会询问是否用 `aibox set` 同步。
+- 安装向导第 6 步检查旧版的 JDK / Maven 包和 Gradle 缓存，询问是否删除。
+- `aibox status` 显示资源配置。
+- 安装向导的选择题改为 ↑↓ 选择、回车确认，是 / 否也可以直接按 y、n。时区、语言、内存、CPU 列出常用选项，另有「手动输入…」填其他值；已配置的代理地址和 API key 可以选择沿用、换新值或删除。文字输入支持左右移动光标修改。`aibox` 命令里的确认和选择（迁移方式、`aibox tmp enter` 不带参数时选容器、删除 / 停止 / 更新前的确认）也改成同样的菜单，两者共用新增的 `aibox-ui.sh`。输入不是终端时（管道、脚本）仍按编号和 y/n 读取，读到输入结束按默认处理（`aibox` 的确认默认为否）。
+
+### 修复
+
+- 安装向导的代理连通测试改为不带 key 请求 `https://api.anthropic.com/v1/models`，只有收到 Claude API 自己的 401（`authentication_error`）才算接通。以前请求根路径，任何 HTTP 状态码（包括 404）都算通，代理或中间设备返回的拦截页也会被误判为可用。返回 403 时会提示出口 IP 所在地区可能不受支持。
+- 代理是 `socks5://` 时，连通测试改由代理端解析域名，和容器里 gost 的实际行为一致。以前 Mac 上开着 fake-ip 模式的代理软件时，本机会把域名解析成 `198.18.x.x` 假地址，测试因此超时，其实容器里能正常用。
+
+### 移除
+
+- `~/.aibox/third_party/` 里的 `jdk8.tar.gz`、`maven.tar.gz` 不再进入构建上下文，镜像也不再安装它们；首次运行时也不再从程序目录搬迁它们和 Gradle 缓存。
+- 临时容器的 `~/.m2/repository`、Gradle 缓存挂载，以及入口脚本为 Maven / Gradle 生成代理配置的逻辑。
+
 ## [0.3.0] - 2026-10-22
 
 支持通过 Homebrew 安装：`brew install simpletang/tap/aibox`，然后运行 `aibox setup`。

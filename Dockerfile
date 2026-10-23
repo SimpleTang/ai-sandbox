@@ -54,30 +54,14 @@ ENV TZ=UTC \
 # ============ 可选本地包(third_party/)层:构建期只 COPY 不联网,极少变 ============
 
 # 整目录复制,因此公开仓库只保留 third_party/.gitkeep 时也能构建。
-# 下面只识别三个约定文件,彼此独立、任意组合均可:
+# 只识别一个约定文件:
 #   gost          容器内 HTTP -> 上游代理转换器;仅配置 AIBOX_PROXY 时需要
-#   jdk8.tar.gz   JDK 8 发行包,解压后顶层目录会被剥离
-#   maven.tar.gz  Maven 发行包,解压后顶层目录会被剥离
-# 未提供这些文件时不会安装对应组件,Claude Code / Codex 核心镜像仍可正常构建。
+# 未提供时不安装,Claude Code / Codex 核心镜像仍可正常构建。
 COPY third_party/ /tmp/third_party/
 RUN set -eux; \
     if [ -f /tmp/third_party/gost ]; then \
         install -m 0755 /tmp/third_party/gost /usr/local/bin/gost; \
         /usr/local/bin/gost -V; \
-    fi; \
-    if [ -f /tmp/third_party/jdk8.tar.gz ]; then \
-        mkdir -p /opt/java/jdk8; \
-        tar -xzf /tmp/third_party/jdk8.tar.gz -C /opt/java/jdk8 --strip-components=1; \
-        test -x /opt/java/jdk8/bin/java; \
-        /opt/java/jdk8/bin/java -version; \
-    fi; \
-    if [ -f /tmp/third_party/maven.tar.gz ]; then \
-        mkdir -p /opt/maven; \
-        tar -xzf /tmp/third_party/maven.tar.gz -C /opt/maven --strip-components=1; \
-        test -x /opt/maven/bin/mvn; \
-    fi; \
-    if [ -x /opt/java/jdk8/bin/java ] && [ -x /opt/maven/bin/mvn ]; then \
-        JAVA_HOME=/opt/java/jdk8 PATH="/opt/java/jdk8/bin:/opt/maven/bin:$PATH" /opt/maven/bin/mvn -v; \
     fi; \
     rm -rf /tmp/third_party
 
@@ -108,13 +92,8 @@ RUN pip3 install --break-system-packages ai-ipcheck \
 #      而 ~/.codex 已被整目录挂载,无游离在挂载点外的配置文件。
 ENV CLAUDE_CONFIG_DIR=/home/node/.claude
 
-# ---- 预建挂载点父目录,归属 node ----
-# ai-box 会把宿主机 ~/.m2/repository 挂到 /home/node/.m2/repository。
-# 若 /home/node/.m2 不存在,容器运行时会以 root 自动补建这个中间目录,
-# 导致 entrypoint(node 用户)往里写 settings.xml 时 Permission denied、容器启动即退。
-# 在镜像里先建好并 chown,运行时就只做挂载、不再补建。.gradle 同理顺手建上。
-RUN mkdir -p /home/node/.m2 /home/node/.gradle /run/aibox \
-    && chown node:node /home/node/.m2 /home/node/.gradle \
+# ---- 运行期目录:ai-box 把临时 env-file 等挂到 /run/aibox 下 ----
+RUN mkdir -p /run/aibox \
     && chmod 0711 /run/aibox
 
 # gost 使用独立 UID 建立唯一允许直连外网的连接。普通 node 进程只能访问

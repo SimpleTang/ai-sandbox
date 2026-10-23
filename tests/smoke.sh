@@ -95,7 +95,7 @@ ORIGINAL_PATH="$PATH"
 HOST_STUB_PATH="$STUB_BIN:$ORIGINAL_PATH"
 
 mkdir -p "$FIXTURE" "$STUB_BIN" "$TEST_HOME" "$RUN_TMP" "$PROJECT"
-cp "$ROOT/ai-box" "$ROOT/Dockerfile" "$ROOT/Dockerfile.dev" "$ROOT/Dockerfile.update" \
+cp "$ROOT/ai-box" "$ROOT/aibox-ui.sh" "$ROOT/Dockerfile" "$ROOT/Dockerfile.dev" "$ROOT/Dockerfile.update" \
     "$ROOT/.dockerignore" "$ROOT/entrypoint.sh" "$ROOT/network-lockdown.sh" "$ROOT/user-exec.sh" \
     "$ROOT/enter-shell.sh" "$ROOT/dev-profile.sh" "$ROOT/dev-shell.sh" "$ROOT/dev-configure.sh" \
     "$ROOT/dev-proxy-run.sh" "$ROOT/dev-tools.sh" "$ROOT/aibox-dev-proxy.service" "$FIXTURE/"
@@ -352,7 +352,8 @@ run_fixture() (
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
     export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
     export ANTHROPIC_API_KEY="host-anthropic-key-must-not-be-forwarded"
-    unset OPENAI_API_KEY AIBOX_PROXY AIBOX_TZ AIBOX_LANG
+    unset OPENAI_API_KEY AIBOX_PROXY AIBOX_TZ AIBOX_LANG AIBOX_MEMORY AIBOX_CPUS
+    [ -z "${FIXTURE_MEMORY:-}" ] || export AIBOX_MEMORY="$FIXTURE_MEMORY"
     unset FIXED_SOCKS_HOST FIXED_SOCKS_PORT FIXED_SOCKS_USER FIXED_SOCKS_PASS
     "$FIXTURE/ai-box" tmp "$PROJECT"
 )
@@ -364,7 +365,7 @@ run_fixture_command() (
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
     export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
-    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
+    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG AIBOX_MEMORY AIBOX_CPUS
     unset FIXED_SOCKS_HOST FIXED_SOCKS_PORT FIXED_SOCKS_USER FIXED_SOCKS_PASS
     "$FIXTURE/ai-box" "$@"
 )
@@ -699,6 +700,45 @@ run_fixture > "$TMP_ROOT/proxy.output" 2>&1 || fail "proxy-mode launch failed"
 assert_arg_pair --cap-add CAP_NET_ADMIN
 assert_arg_pair --label 'com.simpletang.ai-sandbox.managed=true'
 
+# Resources: 8192M and the container's own CPU default unless aibox.conf says otherwise.
+# Build caches (Maven / Gradle) are no longer mounted.
+assert_arg_pair --memory 8192M
+assert_file_omits "$STUB_ARGS" '--cpus' "a launch without AIBOX_CPUS passed --cpus"
+assert_file_omits "$STUB_ARGS" '/.m2' "the temporary container still mounts a Maven cache"
+assert_file_omits "$STUB_ARGS" '/.gradle' "the temporary container still mounts a Gradle cache"
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
+AIBOX_PROXY=""
+AIBOX_TZ="UTC"
+AIBOX_LANG="C.UTF-8"
+AIBOX_MEMORY="16g"
+AIBOX_CPUS="6"
+AIBOX_ENV_VARS=()
+CONF
+reset_stub_files
+run_fixture > "$TMP_ROOT/resources.output" 2>&1 || fail "launch with configured resources failed"
+assert_arg_pair --memory 16G
+assert_arg_pair --cpus 6
+reset_stub_files
+FIXTURE_MEMORY=4G run_fixture > "$TMP_ROOT/resources-env.output" 2>&1 \
+    || fail "launch with AIBOX_MEMORY from the environment failed"
+assert_arg_pair --memory 4G
+for bad_resource in 'AIBOX_MEMORY="8"' 'AIBOX_MEMORY="8GB"' 'AIBOX_CPUS="0"' 'AIBOX_CPUS="two"'; do
+    printf 'AIBOX_TZ="UTC"\n%s\n' "$bad_resource" > "$TEST_HOME/.aibox/aibox.conf"
+    reset_stub_files
+    if run_fixture > "$TMP_ROOT/resources-bad.output" 2>&1; then
+        fail "an invalid resource setting was accepted: $bad_resource"
+    fi
+    assert_file_contains "$TMP_ROOT/resources-bad.output" '格式不对' \
+        "an invalid resource setting was not explained: $bad_resource"
+    [ ! -e "$STUB_ARGS" ] || fail "an invalid resource setting still started a container: $bad_resource"
+done
+cat > "$TEST_HOME/.aibox/aibox.conf" <<'CONF'
+AIBOX_PROXY="socks5h://proxy.example.invalid:1080"
+AIBOX_TZ="UTC"
+AIBOX_LANG="C.UTF-8"
+AIBOX_ENV_VARS=()
+CONF
+
 # Legacy ai-* and other names must never enter the managed container list.
 STUB_LS_RUNNING="aibox-alpha-project-120000-101
 ai-legacy-project-120000
@@ -720,6 +760,22 @@ assert_arg_pair -u root
 assert_arg_pair -w '/workspace/alpha-project'
 assert_file_contains "$STUB_ARGS" '/usr/local/sbin/aibox-enter-shell' \
     "enter did not use the trusted privilege-drop helper"
+
+# Without a target, enter offers a menu of the running containers (item numbers outside a
+# terminal); end of input cancels instead of picking one.
+reset_stub_files
+STUB_LS_RUNNING="aibox-alpha-project-120000-101
+aibox-beta-project-120500-202"
+printf '2\n' | run_fixture_command tmp enter > "$TMP_ROOT/enter-menu.output" 2>&1 \
+    || fail "choosing a container from the enter menu failed"
+assert_file_contains "$TMP_ROOT/enter-menu.output" 'beta-project' \
+    "the enter menu did not list the running containers"
+assert_arg_pair -w '/workspace/beta-project'
+reset_stub_files
+if run_fixture_command tmp enter < /dev/null > "$TMP_ROOT/enter-eof.output" 2>&1; then
+    fail "enter without input should cancel"
+fi
+[ ! -s "$STUB_ARGS" ] || fail "enter without input still entered a container"
 STUB_LS_RUNNING=""
 STUB_LS_ALL=""
 
@@ -811,6 +867,18 @@ dev_env_file_path="$(sed -n '1p' "$STUB_ENV_PATH")"
 if find "$RUN_TMP" -type f \( -name 'aibox-dev-env.*' -o -name 'aibox-dev-system.*' \) | grep -q .; then
     fail "dev launcher left a temporary environment file"
 fi
+
+# Configured resources apply when the machine is first created.
+cp "$TEST_HOME/.aibox/aibox.conf" "$TMP_ROOT/dev-conf.saved"
+printf 'AIBOX_MEMORY="12G"\nAIBOX_CPUS="3"\n' >> "$TEST_HOME/.aibox/aibox.conf"
+reset_stub_files
+STUB_MACHINE_LIST=""
+run_fixture_command > "$TMP_ROOT/dev-create-resources.output" 2>&1 \
+    || fail "creating the persistent machine with configured resources failed"
+assert_file_contains "$STUB_CALLS" \
+    'CALL machine create --name aibox-dev --memory 12G --cpus 3 --home-mount rw ai-sandbox-dev:latest' \
+    "the persistent machine was not created with the configured resources"
+mv "$TMP_ROOT/dev-conf.saved" "$TEST_HOME/.aibox/aibox.conf"
 
 reset_stub_files
 STUB_MACHINE_LIST="aibox-dev"
@@ -946,6 +1014,8 @@ assert_file_contains "$TMP_ROOT/dev-status.output" '启动时间   : 2026-08-16T
 fi
 assert_file_omits "$TMP_ROOT/dev-status.output" '[{"cpus"' \
     "dev status leaked raw inspect JSON"
+assert_file_contains "$TMP_ROOT/dev-status.output" '资源配置   : 内存 8192M / CPU 默认' \
+    "status did not show the configured container resources"
 
 reset_stub_files
 STUB_MACHINE_INSPECT_FAIL=1
@@ -1190,7 +1260,7 @@ ENTRYPOINT_RESULT="$TMP_ROOT/entrypoint-user-env.result"
 BASH_ENV_MARKER="$TMP_ROOT/bash-env.marker"
 BASH_ENV_HOOK="$TMP_ROOT/bash-env-hook"
 DELAYED_ENV_FILE="$TMP_ROOT/delayed-user-env"
-mkdir -p "$ENTRYPOINT_HOME/.m2" "$ENTRYPOINT_HOME/.gradle"
+mkdir -p "$ENTRYPOINT_HOME"
 cat > "$BASH_ENV_HOOK" <<'HOOK'
 printf '%s\n' "user-phase" > "$BASH_ENV_MARKER"
 HOOK
@@ -1247,8 +1317,9 @@ assert_file_contains "$TMP_ROOT/linux-guard.output" 'macOS' "the non-macOS refus
 PATH="$STUB_BIN:$ORIGINAL_PATH" STUB_UNAME=Linux "$FIXTURE/ai-box" --version > /dev/null \
     || fail "aibox --version must work everywhere"
 
-# The old layout (config, third_party assets, Gradle cache in the program directory) moves
-# into ~/.aibox once. The config leaves a link behind so habits keep working.
+# The old layout (config and gost in the program directory) moves into ~/.aibox once. The config
+# leaves a link behind so habits keep working. The Gradle cache is no longer used and stays put;
+# aibox setup offers to delete it.
 mv "$STATE/aibox.conf" "$TMP_ROOT/state-conf.saved"
 printf 'AIBOX_TZ="UTC"\n' > "$FIXTURE/aibox.conf"
 mkdir -p "$FIXTURE/third_party" "$FIXTURE/cache/gradle/caches"
@@ -1263,8 +1334,9 @@ assert_file_has_line "$STATE/aibox.conf" 'AIBOX_TZ="UTC"' "aibox.conf was not mo
 [ "$(file_mode_of "$STATE/aibox.conf")" = "600" ] || fail "the moved aibox.conf is not mode 600"
 assert_file_has_line "$STATE/third_party/gost" 'fake-gost' "third_party/gost was not moved"
 [ ! -e "$FIXTURE/third_party/gost" ] || fail "third_party/gost was left in the program directory"
-assert_file_has_line "$STATE/cache/gradle/caches/entry" 'cached' "the Gradle cache was not moved"
-[ ! -e "$FIXTURE/cache" ] || fail "the old cache directory was left behind"
+[ ! -e "$STATE/cache" ] || fail "the unused Gradle cache was moved into ~/.aibox"
+assert_file_has_line "$FIXTURE/cache/gradle/caches/entry" 'cached' "the old Gradle cache was touched"
+rm -rf "$FIXTURE/cache"
 run_fixture_command status > "$TMP_ROOT/relocate-again.output" 2>&1 || fail "a second run failed"
 assert_file_omits "$TMP_ROOT/relocate-again.output" '已把' "relocation ran twice"
 # A stale copy left in the old place is pointed out instead of silently ignored.
@@ -1277,9 +1349,10 @@ rm -f "$FIXTURE/third_party/gost"
 rm -f "$FIXTURE/aibox.conf"
 mv "$TMP_ROOT/state-conf.saved" "$STATE/aibox.conf"
 
-# Builds use a staged context: program files from the .dockerignore allowlist plus the
-# third_party assets from ~/.aibox; nothing else from either directory.
+# Builds use a staged context: program files from the .dockerignore allowlist plus gost
+# from ~/.aibox; nothing else from either directory (the old JDK / Maven archives included).
 printf 'local-secret\n' > "$FIXTURE/not-in-allowlist.txt"
+printf 'old-jdk\n' > "$STATE/third_party/jdk8.tar.gz"
 reset_stub_files
 run_fixture_command tmp build > "$TMP_ROOT/stage-build.output" 2>&1 || fail "staged build failed"
 for staged in ./Dockerfile ./entrypoint.sh ./.dockerignore ./third_party/gost ./clipboard-bridge/xclip-shim.sh; do
@@ -1287,6 +1360,8 @@ for staged in ./Dockerfile ./entrypoint.sh ./.dockerignore ./third_party/gost ./
 done
 assert_file_omits "$STUB_BUILD_CONTEXT" 'not-in-allowlist.txt' "the build context leaked a non-allowlisted file"
 assert_file_omits "$STUB_BUILD_CONTEXT" 'aibox.conf' "the build context leaked aibox.conf"
+assert_file_omits "$STUB_BUILD_CONTEXT" 'jdk8.tar.gz' "the build context still picks up the old JDK archive"
+rm -f "$STATE/third_party/jdk8.tar.gz"
 if find "$RUN_TMP" -maxdepth 1 -name 'aibox-build.*' | grep -q .; then
     fail "the staged build context was not cleaned up"
 fi
@@ -1588,7 +1663,7 @@ SETUP_FIXTURE="$TMP_ROOT/setup-repo"
 SETUP_HOME="$TMP_ROOT/setup-home"
 SETUP_BIN="$TMP_ROOT/setup-bin"
 mkdir -p "$SETUP_FIXTURE" "$SETUP_HOME" "$SETUP_BIN"
-cp "$ROOT/ai-box" "$ROOT/setup.sh" "$ROOT/aibox.conf.example" "$ROOT/ai-box-completion.sh" \
+cp "$ROOT/ai-box" "$ROOT/aibox-ui.sh" "$ROOT/setup.sh" "$ROOT/aibox.conf.example" "$ROOT/ai-box-completion.sh" \
     "$ROOT/Dockerfile" "$ROOT/entrypoint.sh" "$SETUP_FIXTURE/"
 chmod +x "$SETUP_FIXTURE/ai-box" "$SETUP_FIXTURE/setup.sh"
 # The wizard records physical paths; on macOS the temp directory sits behind the /var symlink.
@@ -1613,8 +1688,35 @@ cat > "$SETUP_BIN/launchctl" <<'STUB'
 #!/bin/sh
 exit 1
 STUB
+# A 16G / 8-core Mac, so the resource limits in the wizard are deterministic.
+cat > "$SETUP_BIN/sysctl" <<'STUB'
+#!/bin/sh
+case "${2:-}" in
+    hw.memsize) echo 17179869184 ;;
+    hw.ncpu) echo 8 ;;
+    hw.optional.arm64) echo 1 ;;
+    *) exit 1 ;;
+esac
+STUB
+# The proxy probe gets a canned API response when SETUP_CURL_CODE is set; the proxy config
+# curl reads from stdin is saved so the test can check which URL scheme was used.
 cat > "$SETUP_BIN/curl" <<'STUB'
 #!/bin/sh
+out=""
+probe=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o) out="$2"; shift ;;
+        https://api.anthropic.com/*) probe=1 ;;
+    esac
+    shift
+done
+if [ "$probe" -eq 1 ] && [ -n "${SETUP_CURL_CODE:-}" ]; then
+    cat > "$SETUP_CURL_STDIN"
+    printf '%s' "${SETUP_CURL_BODY:-}" > "$out"
+    printf '\n%s' "$SETUP_CURL_CODE"
+    exit 0
+fi
 echo "curl: network is disabled in smoke tests" >&2
 exit 7
 STUB
@@ -1630,7 +1732,8 @@ run_setup() (
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
     export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
-    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
+    export SETUP_CURL_CODE SETUP_CURL_BODY SETUP_CURL_STDIN
+    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG AIBOX_MEMORY AIBOX_CPUS
     unset FIXED_SOCKS_HOST FIXED_SOCKS_PORT FIXED_SOCKS_USER FIXED_SOCKS_PASS
     "$SETUP_FIXTURE/setup.sh" "$@"
 )
@@ -1643,6 +1746,8 @@ setup_conf_values() (
     printf 'PROXY=%s\n' "$AIBOX_PROXY"
     printf 'TZ=%s\n' "$AIBOX_TZ"
     printf 'LANG=%s\n' "$AIBOX_LANG"
+    printf 'MEMORY=%s\n' "$AIBOX_MEMORY"
+    printf 'CPUS=%s\n' "$AIBOX_CPUS"
     for setup_entry in "${AIBOX_ENV_VARS[@]}"; do
         printf 'ENV=%s\n' "$setup_entry"
     done
@@ -1652,6 +1757,9 @@ STUB_LS_RUNNING=""
 STUB_IMAGE_PRESENT=1
 STUB_MACHINE_LIST=""
 STUB_MACHINE_HOME=""
+SETUP_CURL_CODE=""
+SETUP_CURL_BODY=""
+SETUP_CURL_STDIN="$TMP_ROOT/setup-curl.stdin"
 reset_stub_files
 
 # --check reports what is missing and changes nothing.
@@ -1664,7 +1772,9 @@ assert_file_contains "$TMP_ROOT/setup-check.output" '还没有安装 aibox 命�
 [ ! -e "$SETUP_HOME/.zshrc" ] || fail "setup --check modified the shell profile"
 [ ! -e "$SETUP_HOME/.aibox/aibox.conf" ] || fail "setup --check created aibox.conf"
 
-# A full first run. Answers follow the prompt order; invalid entries prove re-prompting,
+# A full first run. Answers follow the prompt order; outside a terminal the menus take their
+# item numbers. Time zone, language, memory and CPU go through the manual-entry item, where
+# invalid entries prove re-prompting (including memory / CPU above what the Mac has),
 # the localhost proxy is rewritten to the container gateway, and the secret keeps quotes,
 # a dollar sign and a backslash verbatim.
 SETUP_PROXY_INPUT='socks5h://us%40er:pa'"'"'ss$word"x@127.0.0.1:1080/'
@@ -1674,13 +1784,17 @@ SETUP_KEY_EXPECTED='sk-ant-'"'"'quote$HOME"x \back'
 printf '%s\n' \
     '' 'y' 'y' \
     'y' \
-    '2' "$SETUP_PROXY_INPUT" 'y' 'n' 'n' \
-    'bad zone' 'UTC' \
-    'xx_XX.UTF-8' 'zh_CN.UTF-8' \
+    '2' "$SETUP_PROXY_INPUT" 'y' 'n' 'y' \
+    '11' 'bad zone' 'UTC' \
+    '7' 'xx_XX.UTF-8' 'zh_CN.UTF-8' \
+    '5' '8GB' '32G' '12g' \
+    '6' 'x' '16' '4' \
     '2' "$SETUP_KEY_INPUT" 'ftp://nope' '' '' \
     'y' \
     'n' \
-    | run_setup > "$TMP_ROOT/setup-first.output" 2>&1 && setup_status=0 || setup_status=$?
+    | SETUP_CURL_CODE=401 \
+      SETUP_CURL_BODY='{"type":"error","error":{"type":"authentication_error","message":"x-api-key header is required"}}' \
+      run_setup > "$TMP_ROOT/setup-first.output" 2>&1 && setup_status=0 || setup_status=$?
 [ "$setup_status" -eq 1 ] \
     || fail "first setup run should end with gost pending (status $setup_status)"
 assert_file_contains "$TMP_ROOT/setup-first.output" 'third_party/gost' \
@@ -1695,7 +1809,7 @@ assert_file_has_line "$SETUP_HOME/.zshrc" "source '$SETUP_FIXTURE_REAL/ai-box-co
 [ "$(file_mode_of "$SETUP_HOME/.aibox/aibox.conf")" = "600" ] || fail "aibox.conf is not mode 600"
 bash -n "$SETUP_HOME/.aibox/aibox.conf" || fail "generated aibox.conf has a syntax error"
 printf '%s\n' \
-    "PROXY=$SETUP_PROXY_EXPECTED" 'TZ=UTC' 'LANG=zh_CN.UTF-8' \
+    "PROXY=$SETUP_PROXY_EXPECTED" 'TZ=UTC' 'LANG=zh_CN.UTF-8' 'MEMORY=12G' 'CPUS=4' \
     "ENV=ANTHROPIC_API_KEY=$SETUP_KEY_EXPECTED" > "$TMP_ROOT/setup-first.expected"
 setup_conf_values > "$TMP_ROOT/setup-first.actual" || fail "generated aibox.conf cannot be sourced"
 cmp -s "$TMP_ROOT/setup-first.expected" "$TMP_ROOT/setup-first.actual" \
@@ -1703,6 +1817,14 @@ cmp -s "$TMP_ROOT/setup-first.expected" "$TMP_ROOT/setup-first.actual" \
 if grep -rq 'sk-ant-' "$TMP_ROOT/setup-first.output"; then
     fail "setup echoed the API key"
 fi
+assert_file_contains "$TMP_ROOT/setup-first.output" '已接通 Claude API' \
+    "the proxy probe did not accept the Claude API's own 401"
+assert_file_contains "$SETUP_CURL_STDIN" 'proxy = "socks5h://us%40er:' \
+    "the proxy probe did not pass the proxy to curl through stdin"
+assert_file_contains "$TMP_ROOT/setup-first.output" '超过了本机内存' \
+    "setup accepted more memory than the Mac has"
+assert_file_contains "$TMP_ROOT/setup-first.output" '超过了本机的 8 核' \
+    "setup accepted more CPUs than the Mac has"
 
 # ai-box itself must accept the generated file and forward the key through the env-file.
 reset_stub_files
@@ -1711,12 +1833,14 @@ reset_stub_files
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
     export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
-    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
+    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG AIBOX_MEMORY AIBOX_CPUS
     "$SETUP_FIXTURE/ai-box" tmp "$PROJECT"
 ) > "$TMP_ROOT/setup-launch.output" 2>&1 || fail "ai-box rejected the generated aibox.conf"
 assert_file_has_line "$STUB_ENV_COPY" "ANTHROPIC_API_KEY=$SETUP_KEY_EXPECTED" \
     "generated API key did not reach the env-file verbatim"
 assert_arg_pair --cap-add CAP_NET_ADMIN
+assert_arg_pair --memory 12G
+assert_arg_pair --cpus 4
 
 # A second run skips finished steps and must not duplicate profile lines or touch the config.
 cp -p "$SETUP_HOME/.aibox/aibox.conf" "$TMP_ROOT/setup-conf.before"
@@ -1735,20 +1859,29 @@ fi
 
 # Reconfiguring keeps current values by default, preserves unrelated AIBOX_ENV_VARS
 # entries, tightens loose permissions and backs up the previous file.
+# The persistent machine already exists, so the changed memory is offered to it via aibox set.
+reset_stub_files
+STUB_MACHINE_LIST="aibox-dev"
 printf '%s\n' "AIBOX_ENV_VARS+=('CUSTOM_KEEP=kept value')" >> "$SETUP_HOME/.aibox/aibox.conf"
 chmod 644 "$SETUP_HOME/.aibox/aibox.conf"
+# The proxy changes to plain socks5://; the probe must still let the proxy resolve names
+# (as gost does in the container) and must not count a 404 from elsewhere as connected.
+SETUP_PROXY_SOCKS5='socks5://user2:pw2@proxy.example.invalid:443'
 printf '%s\n' \
     'y' 'y' \
-    '' '' 'n' 'n' \
+    '' '2' "$SETUP_PROXY_SOCKS5" 'n' 'y' \
     '' \
     '' \
+    '4' '' \
     '' '' 'https://relay.example.invalid/api' '' \
     '' \
+    'y' \
     'n' \
-    | run_setup > "$TMP_ROOT/setup-third.output" 2>&1 && setup_status=0 || setup_status=$?
+    | SETUP_CURL_CODE=404 SETUP_CURL_BODY='Not Found' \
+      run_setup > "$TMP_ROOT/setup-third.output" 2>&1 && setup_status=0 || setup_status=$?
 [ "$setup_status" -eq 1 ] || fail "third setup run should still report gost (status $setup_status)"
 printf '%s\n' \
-    "PROXY=$SETUP_PROXY_EXPECTED" 'TZ=UTC' 'LANG=zh_CN.UTF-8' \
+    "PROXY=$SETUP_PROXY_SOCKS5" 'TZ=UTC' 'LANG=zh_CN.UTF-8' 'MEMORY=16G' 'CPUS=4' \
     'ENV=CUSTOM_KEEP=kept value' \
     "ENV=ANTHROPIC_API_KEY=$SETUP_KEY_EXPECTED" \
     'ENV=ANTHROPIC_BASE_URL=https://relay.example.invalid/api' > "$TMP_ROOT/setup-third.expected"
@@ -1760,20 +1893,32 @@ setup_backup="$(ls "$SETUP_HOME/.aibox"/aibox.conf.bak.* 2>/dev/null | head -n 1
 [ -n "$setup_backup" ] || fail "reconfiguring did not back up the previous config"
 [ "$(file_mode_of "$setup_backup")" = "600" ] || fail "config backup is not mode 600"
 grep -qF 'CUSTOM_KEEP' "$setup_backup" || fail "config backup does not hold the previous content"
+assert_file_contains "$SETUP_CURL_STDIN" 'proxy = "socks5h://user2:pw2@proxy.example.invalid:443"' \
+    "the proxy probe resolved names locally for a socks5:// proxy"
+assert_file_contains "$TMP_ROOT/setup-third.output" '不是 Claude API 的预期结果(HTTP 404)' \
+    "the proxy probe counted a non-Claude 404 as connected"
+if grep -q '已接通 Claude API' "$TMP_ROOT/setup-third.output"; then
+    fail "the proxy probe reported a 404 as connected"
+fi
+assert_file_contains "$STUB_CALLS" 'CALL machine set --name aibox-dev memory=16G cpus=4' \
+    "changed resources were not synced to the existing persistent machine"
+STUB_MACHINE_LIST=""
 
 # Switching to direct mode and account login drops the proxy and the managed keys,
 # keeps unrelated entries, and leaves nothing pending.
 printf '%s\n' \
     'y' \
     '1' \
-    '-' \
-    '-' \
+    '1' \
+    '1' \
+    '1' '1' \
     '1' '' \
     'y' \
     'n' \
     | run_setup > "$TMP_ROOT/setup-fourth.output" 2>&1 \
     || fail "setup should be complete after switching to direct mode"
-printf '%s\n' 'PROXY=' 'TZ=' 'LANG=' 'ENV=CUSTOM_KEEP=kept value' > "$TMP_ROOT/setup-fourth.expected"
+printf '%s\n' 'PROXY=' 'TZ=' 'LANG=' 'MEMORY=' 'CPUS=' 'ENV=CUSTOM_KEEP=kept value' \
+    > "$TMP_ROOT/setup-fourth.expected"
 setup_conf_values > "$TMP_ROOT/setup-fourth.actual" || fail "direct-mode aibox.conf cannot be sourced"
 cmp -s "$TMP_ROOT/setup-fourth.expected" "$TMP_ROOT/setup-fourth.actual" \
     || fail "switching to account login did not drop only the managed keys"
@@ -1822,7 +1967,7 @@ printf '%s\n' 'y' 'y' 'n' 'n' | (
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
     export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
-    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
+    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG AIBOX_MEMORY AIBOX_CPUS
     "$BREW_LIBEXEC/setup.sh"
 ) > "$TMP_ROOT/setup-brew.output" 2>&1 || { cat "$TMP_ROOT/setup-brew.output" >&2; fail "the wizard on a Homebrew install reported pending steps"; }
 assert_file_contains "$TMP_ROOT/setup-brew.output" '通过 Homebrew 安装' "the wizard did not detect Homebrew"
@@ -1843,7 +1988,7 @@ reset_stub_files
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV
     export STUB_CALLS STUB_ENV_LOG STUB_LS_RUNNING STUB_LS_ALL STUB_MACHINE_LIST STUB_MACHINE_LIST_FAIL STUB_IMAGE_PRESENT
     export STUB_MACHINE_INSPECT_JSON STUB_MACHINE_INSPECT_FAIL STUB_DEV_SYSTEMD_FAIL STUB_MACHINE_HOME STUB_MACHINE_BUSY STUB_CONTAINER_VERSION STUB_BUILD_CONTEXT
-    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG
+    unset AIBOX_PROXY AIBOX_TZ AIBOX_LANG AIBOX_MEMORY AIBOX_CPUS
     "$BREW/bin/aibox" tmp build && "$BREW/bin/aibox" tmp version && "$BREW/bin/aibox" tmp "$PROJECT"
 ) > "$TMP_ROOT/brew-readonly.output" 2>&1 || { chmod -R u+w "$BREW_LIBEXEC"; fail "a read-only Homebrew install failed to build or launch"; }
 chmod -R u+w "$BREW_LIBEXEC"

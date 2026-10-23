@@ -44,12 +44,14 @@
 #   AIBOX_TZ      时区;留空=跟随宿主机
 #   AIBOX_LANG    语言;留空=跟随宿主机
 #   AIBOX_ENV_VARS 传入容器的自定义 NAME=value 数组
+#   AIBOX_MEMORY / AIBOX_CPUS  容器内存 / CPU;留空=8192M / container 默认。
+#                 临时容器每次启动时使用,长期容器只在首次创建时使用,之后用 aibox set 调整
 #   (旧的 FIXED_SOCKS_* 环境变量仍作 socks5 代理兜底,兼容老配置)
 # 进容器后直接敲 `claude` 或 `codex`。
 set -euo pipefail
 
 # aibox 自身的版本。发版时与 CHANGELOG.md 的条目和 git tag(v<版本>)保持一致。
-AIBOX_VERSION="0.3.0"
+AIBOX_VERSION="0.3.1"
 
 IMAGE="ai-sandbox:latest"
 DEV_IMAGE="ai-sandbox-dev:latest"
@@ -65,8 +67,7 @@ CONTAINER_TESTED_VERSION="1.6.0"
 # 放在 Home 下:长期容器按原路径挂载整个 Home,临时容器单独挂载需要的子目录。
 #   claude/ codex/      Claude / Codex 状态,两种容器共用,与 Mac 本机 CLI 的 ~/.claude、~/.codex 分开
 #   aibox.conf          运行期配置
-#   third_party/        可选的 gost / JDK / Maven,构建时放进构建上下文
-#   cache/gradle/       临时容器的 Gradle 缓存
+#   third_party/        可选的 gost,构建时放进构建上下文
 #   versions.env        aibox tmp update 升级过的 CLI 版本,构建时覆盖 Dockerfile 里的默认值
 #   machine/            同步进长期容器前暂存的辅助脚本
 AIBOX_STATE_DIR="$HOME/.aibox"
@@ -74,7 +75,6 @@ CLAUDE_STATE="$AIBOX_STATE_DIR/claude"
 CODEX_STATE="$AIBOX_STATE_DIR/codex"
 AIBOX_CONF="$AIBOX_STATE_DIR/aibox.conf"
 AIBOX_THIRD_PARTY="$AIBOX_STATE_DIR/third_party"
-AIBOX_CACHE_DIR="$AIBOX_STATE_DIR/cache"
 AIBOX_VERSIONS_FILE="$AIBOX_STATE_DIR/versions.env"
 AIBOX_MACHINE_STAGE="$AIBOX_STATE_DIR/machine"
 
@@ -103,6 +103,10 @@ case "$SANDBOX_DIR" in
         AIBOX_INSTALL_KIND="homebrew"
         ;;
 esac
+
+# 交互输入(终端里的 ↑↓ 菜单,非终端时退回编号 / y/n;输入结束时按默认值)与 setup.sh 共用
+# shellcheck source=aibox-ui.sh
+source "$SANDBOX_DIR/aibox-ui.sh"
 
 # ---- 公共函数:版本比较、CLI 版本钉、构建上下文、旧布局搬迁 ----
 
@@ -160,7 +164,7 @@ aibox_pin_args() {
 # 在临时目录里组装构建上下文:程序文件按 .dockerignore 的白名单从程序目录取,third_party 从
 # ~/.aibox 取。程序目录因此可以只读(brew 安装),也不会把配置、凭据和缓存带进构建。
 aibox_stage_context() {
-    local ctx line path name
+    local ctx line path
     ctx="$(mktemp -d "${TMPDIR:-/tmp}/aibox-build.XXXXXX")" || return 1
     cp "$SANDBOX_DIR/.dockerignore" "$ctx/.dockerignore" || { rm -rf -- "$ctx"; return 1; }
     while IFS= read -r line || [[ -n "$line" ]]; do
@@ -175,13 +179,9 @@ aibox_stage_context() {
     done < "$SANDBOX_DIR/.dockerignore"
     mkdir -p "$ctx/third_party"
     : > "$ctx/third_party/.gitkeep"
-    for name in gost jdk8.tar.gz maven.tar.gz; do
-        [[ -f "$AIBOX_THIRD_PARTY/$name" ]] || continue
-        # APFS 上 cp -c 是写时复制的克隆,大文件(JDK)不占时间和空间;不支持时退回普通复制
-        cp -c "$AIBOX_THIRD_PARTY/$name" "$ctx/third_party/$name" 2>/dev/null \
-            || cp -p "$AIBOX_THIRD_PARTY/$name" "$ctx/third_party/$name" \
-            || { rm -rf -- "$ctx"; return 1; }
-    done
+    if [[ -f "$AIBOX_THIRD_PARTY/gost" ]]; then
+        cp -p "$AIBOX_THIRD_PARTY/gost" "$ctx/third_party/gost" || { rm -rf -- "$ctx"; return 1; }
+    fi
     printf '%s\n' "$ctx"
 }
 # aibox_build_in_context <container build 参数...>:在暂存的上下文里构建,结束后清理
@@ -193,7 +193,7 @@ aibox_build_in_context() {
     return "$rc"
 }
 
-# 旧版把配置、third_party、Gradle 缓存放在程序目录里,aibox tmp update 还会直接改 Dockerfile。
+# 旧版把配置、third_party/gost 放在程序目录里,aibox tmp update 还会直接改 Dockerfile。
 # 每次运行时检查一遍,发现旧布局就搬到 ~/.aibox(幂等;已有的新位置绝不覆盖)。
 aibox_relocate_state() {
     local moved="" name changed
@@ -212,27 +212,15 @@ aibox_relocate_state() {
         fi
     fi
 
-    for name in gost jdk8.tar.gz maven.tar.gz; do
-        [[ -f "$SANDBOX_DIR/third_party/$name" ]] || continue
-        if [[ ! -e "$AIBOX_THIRD_PARTY/$name" ]]; then
+    # 旧版还认 jdk8.tar.gz / maven.tar.gz 和 Gradle 缓存,现已不用;清理交给 aibox setup,这里不搬
+    if [[ -f "$SANDBOX_DIR/third_party/gost" ]]; then
+        if [[ ! -e "$AIBOX_THIRD_PARTY/gost" ]]; then
             mkdir -p "$AIBOX_THIRD_PARTY"
-            mv -- "$SANDBOX_DIR/third_party/$name" "$AIBOX_THIRD_PARTY/$name"
-            moved="${moved:+${moved}、}third_party/$name"
+            mv -- "$SANDBOX_DIR/third_party/gost" "$AIBOX_THIRD_PARTY/gost"
+            moved="${moved:+${moved}、}third_party/gost"
         else
-            echo "提示: 程序目录里的 third_party/$name 已不再使用,生效的是 ${AIBOX_THIRD_PARTY}/${name}。确认无用后可删除前者。" >&2
+            echo "提示: 程序目录里的 third_party/gost 已不再使用,生效的是 ${AIBOX_THIRD_PARTY}/gost。确认无用后可删除前者。" >&2
         fi
-    done
-
-    # Gradle 缓存正被临时容器挂载时先不动,下次再搬;目标若只是个空目录(新版启动时建的)视同不存在
-    [[ ! -d "$SANDBOX_DIR/cache/gradle" ]] || rmdir "$AIBOX_CACHE_DIR/gradle" 2>/dev/null || true
-    if [[ -d "$SANDBOX_DIR/cache/gradle" && ! -e "$AIBOX_CACHE_DIR/gradle" ]] \
-       && ! container ls -q 2>/dev/null | grep -q "^${CONTAINER_PREFIX}"; then
-        mkdir -p "$AIBOX_CACHE_DIR"
-        mv -- "$SANDBOX_DIR/cache/gradle" "$AIBOX_CACHE_DIR/gradle"
-        rmdir "$SANDBOX_DIR/cache" 2>/dev/null || true
-        moved="${moved:+${moved}、}Gradle 缓存"
-    elif [[ -d "$SANDBOX_DIR/cache/gradle" && -e "$AIBOX_CACHE_DIR/gradle" ]]; then
-        echo "提示: 程序目录里的 cache/gradle 已不再使用,生效的是 ${AIBOX_CACHE_DIR}/gradle。确认无用后可删除前者。" >&2
     fi
 
     # 旧版 aibox tmp update 改过的 Dockerfile 版本号:只在本地改动仅限这两行时提取并还原,
@@ -309,7 +297,8 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
   · 容器里 Claude Code 要贴宿主机剪贴板里的图,先 aibox clip install,然后按 Ctrl+V
     (不是 ⌘V —— ⌘V 会被终端截走当文本粘贴)。详见 clipboard-bridge/README.md。
   · Tab 补全:在 ~/.zshrc 或 ~/.bashrc 里 source "$AIBOX_STABLE_DIR/ai-box-completion.sh"
-  · 代理/时区/语言/自定义环境变量在 "$AIBOX_CONF" 配(aibox setup 可交互生成)。
+  · 代理/时区/语言/资源/自定义环境变量在 "$AIBOX_CONF" 配(aibox setup 可交互生成)。
+    资源(AIBOX_MEMORY / AIBOX_CPUS)对长期容器只在首次创建时生效,之后用 aibox set 调整。
 HELP
 }
 if [[ "${1:-}" == "help" || "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -445,9 +434,7 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "update" ]]; then
         exit 0
     fi
 
-    ANSWER=""
-    read -r -p "==> 确认更新以上版本并重建镜像?[y/N] " ANSWER || true
-    if [[ "$ANSWER" != "y" && "$ANSWER" != "Y" ]]; then
+    if ! ui_yn "确认更新以上版本并重建镜像?" N; then
         echo "==> 已取消,版本记录未改动。"
         exit 0
     fi
@@ -474,9 +461,7 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "update" ]]; then
             exit 0
         fi
         echo "==> 增量构建失败(可能 builder 不支持本地镜像作基础镜像,或网络问题)。" >&2
-        ANSWER=""
-        read -r -p "==> 回退全量构建?(较慢,会重下所有依赖)[y/N] " ANSWER || true
-        if [[ "$ANSWER" != "y" && "$ANSWER" != "Y" ]]; then
+        if ! ui_yn "回退全量构建?(较慢,会重下所有依赖)" N; then
             echo "==> 已跳过构建。新版本已记录,稍后可用 aibox tmp build 全量构建生效。"
             exit 1
         fi
@@ -811,12 +796,7 @@ aibox_migrate_busy_check() {
     [[ -n "$busy" ]] || return 0
     echo "    注意: ${busy}仍在运行。它们会继续读写旧位置,迁移之后写入的内容不会出现在 ~/.aibox 里。"
     echo "    建议先退出它们(包括正在长期容器里运行的 Claude Code 会话),再重新运行。"
-    local ans=""
-    if ! read -r -p "    仍要现在迁移?[y/N] " ans; then
-        echo
-        ans=""
-    fi
-    [[ "$ans" == "y" || "$ans" == "Y" ]]
+    UI_INDENT="    " ui_yn "仍要现在迁移?" N
 }
 
 # 机内旧目录改名备份,原位置换成指向 ~/.aibox 的软链接
@@ -924,22 +904,16 @@ aibox_migrate_legacy() {
         return 1
     fi
     if [[ -n "$t_has" && -n "$m_has" ]]; then
-        echo "    请选择迁移方式(旧数据会改名备份,不会删除):"
-        echo "      1) 用长期容器的"
-        echo "      2) 用临时容器的"
-        echo "      3) 合并:以长期容器的为主,临时容器里独有的文件补进来;同名而内容不同的文件另存为 *.from-tmp"
-        echo "      4) 稍后再说(本次退出,下次启动或运行 aibox migrate 时再问)"
-        while true; do
-            if ! read -r -p "    请选择 [1-4,默认 3]: " ans; then
-                echo
-                ans="4"
-            fi
-            [[ -n "$ans" ]] || ans="3"
-            case "$ans" in
-                1|2|3|4) choice="$ans"; break ;;
-                *) echo "    请输入 1 到 4。" ;;
-            esac
-        done
+        echo "    旧数据会改名备份,不会删除。合并时以长期容器的为主,临时容器里独有的文件补进来;"
+        echo "    同名而内容不同的文件另存为 *.from-tmp。"
+        # 输入结束(非交互)时不替用户做决定,按「稍后再说」处理
+        if ! UI_INDENT="    " ui_menu choice 3 "选择迁移方式" \
+                "用长期容器的" \
+                "用临时容器的" \
+                "合并(以长期容器的为主)" \
+                "稍后再说(本次退出,下次启动或运行 aibox migrate 时再问)"; then
+            choice="4"
+        fi
         if [[ "$choice" == "4" ]]; then
             echo "==> 暂不迁移,本次不启动。准备好后运行 aibox migrate(或直接重新运行)。" >&2
             return 1
@@ -1111,8 +1085,7 @@ if [[ "$AIBOX_MODE" == "dev" ]]; then
             [[ $# -eq 1 ]] || { echo "用法: aibox $dev_action" >&2; exit 2; }
             aibox_dev_require_exists || exit 1
             echo "将删除长期容器 $DEV_MACHINE_NAME 及其系统盘(宿主 Home 和 ~/.aibox 里的文件不受影响)。"
-            read -r -p "确认删除?[y/N] " ans || true
-            if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+            if ! ui_yn "确认删除?" N; then
                 echo "已取消。"
                 exit 0
             fi
@@ -1289,13 +1262,14 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "enter" ]]; then
     fi
 
     if [[ -z "$target" ]]; then
-        # ① 无参数:列编号,读一个数字
-        echo "正在运行的临时容器:"
-        aibox_print
-        printf '选择要进入的编号 [1-%d]: ' "${#AIBOX_LIST[@]}"
-        read -r sel || true
-        if [[ ! "$sel" =~ ^[0-9]+$ ]] || (( sel < 1 || sel > ${#AIBOX_LIST[@]} )); then
-            echo "无效编号: '${sel:-}'" >&2
+        # ① 无参数:从运行中的容器里选一个;输入结束(非交互)时不进入
+        enter_items=()
+        for n in "${AIBOX_LIST[@]}"; do
+            aibox_parse "$n"
+            enter_items+=("$(printf '%-16s  启动 %s  %s' "$REPLY_PROJ" "$REPLY_STARTED" "$n")")
+        done
+        if ! ui_menu sel 1 "进入哪个临时容器?" "${enter_items[@]}"; then
+            echo "已取消。" >&2
             exit 1
         fi
         match="${AIBOX_LIST[$((sel-1))]}"
@@ -1331,8 +1305,7 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "stop" ]]; then
         if [[ -z "$running" ]]; then echo "没有正在运行的临时容器。"; exit 0; fi
         echo "将停止以下所有临时容器:"
         echo "$running" | sed 's/^/    /'
-        read -r -p "确认全部停止?[y/N] " ans || true
-        if [[ "$ans" != "y" && "$ans" != "Y" ]]; then echo "已取消。"; exit 0; fi
+        if ! ui_yn "确认全部停止?" N; then echo "已取消。"; exit 0; fi
         while IFS= read -r n; do [[ -n "$n" ]] && container stop "$n"; done <<< "$running"
         exit 0
     fi
@@ -1378,8 +1351,7 @@ if [[ "$AIBOX_MODE" == "tmp" ]] && [[ "${1:-}" == "clear" || "${1:-}" == "prune"
     fi
     echo "将删除以下已停止的临时容器:"
     printf '    %s\n' "${stopped[@]}"
-    read -r -p "确认删除?[y/N] " ans || true
-    if [[ "$ans" != "y" && "$ans" != "Y" ]]; then echo "已取消。"; exit 0; fi
+    if ! ui_yn "确认删除?" N; then echo "已取消。"; exit 0; fi
     container delete "${stopped[@]}"
     echo "已清理 ${#stopped[@]} 个。"
     exit 0
@@ -1442,6 +1414,16 @@ if [[ "${1:-}" == "status" ]]; then
     xv="$(aibox_pin CODEX_VERSION)"
     echo "  镜像版本   : claude ${cv:-?} / codex ${xv:-?}(临时容器镜像的构建目标;长期容器内实际版本用 aibox version)"
     echo "  登录状态   : $AIBOX_STATE_DIR(两种容器共用)"
+    # 资源配置:与启动时同样的优先级(环境变量 > aibox.conf > 默认),在子 shell 里读配置
+    status_res="$(
+        set +eu
+        env_memory="${AIBOX_MEMORY:-}"; env_cpus="${AIBOX_CPUS:-}"
+        AIBOX_MEMORY=""; AIBOX_CPUS=""
+        # shellcheck disable=SC1090
+        [[ -f "$AIBOX_CONF" ]] && source "$AIBOX_CONF" >/dev/null 2>&1 </dev/null
+        printf '内存 %s / CPU %s' "${env_memory:-${AIBOX_MEMORY:-8192M}}" "${env_cpus:-${AIBOX_CPUS:-默认}}"
+    )"
+    echo "  资源配置   : ${status_res}(临时容器每次启动、长期容器首次创建时使用)"
     echo "  剪贴板贴图 : $(aibox_clip_status_line)"
     if [[ "$svc_up" -eq 0 || "$img_ok" -eq 0 ]]; then
         echo "  提示       : 首次安装可运行 aibox setup(安装向导),逐步补齐缺少的部分"
@@ -1488,6 +1470,7 @@ fi
 # 容器 VM 内存。apple/container 默认每容器只给 1G,claude(node 进程)长会话内存只增不减,
 # 逼近内存墙后 GC 频繁 + page cache 被挤 + 无 swap,表现为越用越卡、最坏被 OOM 杀掉。
 # Mac 对 VM 内存按需分配,调大不会白占宿主机内存。数值必须带单位(见 README 踩坑表)。
+# 这是默认值;aibox.conf 的 AIBOX_MEMORY 非空时以它为准(见下方统一配置)。
 MEMORY="8192M"
 
 # ---- 登录状态目录:两种容器共用 ~/.aibox(旧版数据的迁移见 aibox_migrate_legacy)----
@@ -1531,12 +1514,33 @@ fi
 # 解析在宿主机侧做(时区/语言的「跟随宿主机」只有这里能取到),再通过 -e 传进容器。
 # 先记住环境变量里已有的值(用于覆盖 + 标注来源)
 _env_proxy="${AIBOX_PROXY:-}"; _env_tz="${AIBOX_TZ:-}"; _env_lang="${AIBOX_LANG:-}"
-AIBOX_PROXY=""; AIBOX_TZ=""; AIBOX_LANG=""
+_env_memory="${AIBOX_MEMORY:-}"; _env_cpus="${AIBOX_CPUS:-}"
+AIBOX_PROXY=""; AIBOX_TZ=""; AIBOX_LANG=""; AIBOX_MEMORY=""; AIBOX_CPUS=""
 AIBOX_ENV_VARS=()
 conf_exists=0
 # shellcheck disable=SC1090
 [[ -f "$AIBOX_CONF" ]] && { conf_exists=1; source "$AIBOX_CONF"; }   # 此刻 AIBOX_* = 配置文件的值(或空)
 _conf_proxy="$AIBOX_PROXY"; _conf_tz="$AIBOX_TZ"; _conf_lang="$AIBOX_LANG"
+
+# 资源:环境变量 > aibox.conf > 默认。内存必须带单位(M 或 G),CPU 为正整数;
+# 留空的 CPU 不传 --cpus,由 container 决定(临时容器默认 4 核,长期容器默认宿主一半)。
+AIBOX_MEMORY="${_env_memory:-$AIBOX_MEMORY}"
+AIBOX_CPUS="${_env_cpus:-$AIBOX_CPUS}"
+if [[ -n "$AIBOX_MEMORY" ]]; then
+    if [[ ! "$AIBOX_MEMORY" =~ ^[1-9][0-9]*[MmGg]$ ]]; then
+        echo "错误: AIBOX_MEMORY='$AIBOX_MEMORY' 格式不对,应为带单位的大小,例如 8G、16G 或 4096M。" >&2
+        exit 1
+    fi
+    AIBOX_MEMORY="$(printf '%s' "$AIBOX_MEMORY" | tr 'mg' 'MG')"
+    MEMORY="$AIBOX_MEMORY"
+    DEV_MEMORY="$AIBOX_MEMORY"
+fi
+if [[ -n "$AIBOX_CPUS" && ! "$AIBOX_CPUS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "错误: AIBOX_CPUS='$AIBOX_CPUS' 格式不对,应为正整数,例如 4。" >&2
+    exit 1
+fi
+CPU_ARGS=()
+[[ -z "$AIBOX_CPUS" ]] || CPU_ARGS=(--cpus "$AIBOX_CPUS")
 
 # 自定义环境变量只从 aibox.conf 的 Bash indexed array 读取。每项按第一个等号拆分,
 # 因而空值、空格及值中的额外等号都能原样保留。这里仅校验并暂存;运行容器前再写入
@@ -1647,6 +1651,7 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
         container machine create \
             --name "$DEV_MACHINE_NAME" \
             --memory "$DEV_MEMORY" \
+            ${CPU_ARGS[@]+"${CPU_ARGS[@]}"} \
             --home-mount rw \
             "$DEV_IMAGE"
     fi
@@ -1821,9 +1826,7 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
             if [[ -z "$dev_updates" ]]; then
                 echo "==> 没有可用更新。"
             else
-                ans=""
-                read -r -p "==> 确认更新以上版本?[y/N] " ans || true
-                if [[ "$ans" != "y" && "$ans" != "Y" ]]; then
+                if ! ui_yn "确认更新以上版本?" N; then
                     echo "==> 已取消,长期容器未改动。"
                 else
                     [[ "$dev_updates" == *" "* ]] && dev_updates="all"
@@ -1904,21 +1907,9 @@ CODEX_CREDS="$CODEX_STATE"
 #      镜像里设了 CLAUDE_CONFIG_DIR=/home/node/.claude,.claude.json 落在挂载目录内
 #      (~/.claude/.claude.json),作为目录里的普通文件持久化,onboarding/目录信任不会重置。
 
-# ---- Java 构建缓存 ----
-# Maven:共用宿主机自己的 ~/.m2/repository(主要是 jar 与构件缓存,不含 settings.xml)。
-#        注意只挂 repository 子目录、不挂整个 ~/.m2 —— settings.xml 不能共用:
-#        容器启用代理时由 entrypoint 单独生成对应配置,互不干扰。
-# Gradle:不共用宿主机 ~/.gradle(内含平台相关原生库/文件锁/daemon 状态,
-#        macOS 与 Linux 容器共写同一份会损坏缓存),用沙箱专属目录,容器之间持久化。
-M2_REPO="$HOME/.m2/repository"
-GRADLE_CACHE="$AIBOX_CACHE_DIR/gradle"
-mkdir -p "$M2_REPO" "$GRADLE_CACHE"
-
 # 收集挂载参数:
 #   - 项目目录         -> /workspace/<项目名>
 #   - 容器专属凭据目录  -> /home/node/.claude  与  /home/node/.codex
-#   - Maven 仓库缓存    -> /home/node/.m2/repository(共用宿主机)
-#   - Gradle 缓存       -> /home/node/.gradle(沙箱专属)
 #
 # 挂载点带项目名的原因:Claude Code 以「工作目录的绝对路径」作为项目 key,
 # 会话记录/auto-memory/目录信任都按这个 key 存在共享的 ~/.claude 里。
@@ -1928,8 +1919,6 @@ MOUNTS=(
     -v "$HOST_DIR:/workspace/$PROJECT_NAME"
     -v "$CLAUDE_CREDS:$CONTAINER_HOME/.claude"
     -v "$CODEX_CREDS:$CONTAINER_HOME/.codex"
-    -v "$M2_REPO:$CONTAINER_HOME/.m2/repository"
-    -v "$GRADLE_CACHE:$CONTAINER_HOME/.gradle"
 )
 
 # ---- 剪贴板图片桥接(可选,由 aibox clip install 开启)----
@@ -2034,6 +2023,7 @@ fi
 AIBOX_RUN_ARGS=(
     --rm -it
     --memory "$MEMORY"
+    ${CPU_ARGS[@]+"${CPU_ARGS[@]}"}
     --name "$CONTAINER_NAME"
     --label "$CONTAINER_OWNER_LABEL"
     --label "com.simpletang.ai-sandbox.project=$PROJECT_NAME"
