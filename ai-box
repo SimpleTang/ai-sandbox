@@ -1946,7 +1946,14 @@ fi
 # mktemp -d 原子创建、权限 0700;首次使用时注册 EXIT 与常见终止信号的统一清理。
 # 清理必须只有一个 EXIT trap:bash 的 trap 是覆盖式,分开注册会互相顶掉。
 AIBOX_TMP_DIR=""
+AIBOX_STOP_ON_EXIT=""   # 启动器被信号终止时要顺手停掉的临时容器(正常退出前会清空)
 aibox_cleanup_tmp() {
+    # 关掉终端标签页、SSH 断开时启动器收到 HUP 退出,但容器本身不会随之停止,会以
+    # 无人连接的状态留在后台继续占内存(--rm 只在容器停止后才删除)。这里补一次 stop。
+    if [[ -n "${AIBOX_STOP_ON_EXIT:-}" ]]; then
+        container stop "$AIBOX_STOP_ON_EXIT" >/dev/null 2>&1 || true
+        AIBOX_STOP_ON_EXIT=""
+    fi
     if [[ -n "${AIBOX_TMP_DIR:-}" ]]; then
         rm -rf -- "$AIBOX_TMP_DIR"
         AIBOX_TMP_DIR=""
@@ -2072,4 +2079,9 @@ AIBOX_RUN_ARGS+=(
 )
 
 export AIBOX_PROXY
-container run "${AIBOX_RUN_ARGS[@]}"
+aibox_tmp_dir                         # 确保清理 trap 已注册(没用到临时目录时也需要)
+AIBOX_STOP_ON_EXIT="$CONTAINER_NAME"
+AIBOX_RUN_STATUS=0
+container run "${AIBOX_RUN_ARGS[@]}" || AIBOX_RUN_STATUS=$?
+AIBOX_STOP_ON_EXIT=""                 # 正常结束时 --rm 容器已删除,无需再 stop
+exit "$AIBOX_RUN_STATUS"

@@ -115,6 +115,12 @@ set -eu
     printf '\n'
 } >> "$STUB_CALLS"
 
+# Simulate a container that keeps running until a signal arrives (terminal closed).
+if [ "${1:-}" = "run" ] && [ -n "${STUB_RUN_HANG:-}" ]; then
+    printf '%s\n' "$$" > "$STUB_RUN_HANG"
+    exec sleep 30
+fi
+
 if [ "${1:-}" = "build" ]; then
     # Record what the staged build context contains; the launcher runs build inside it.
     find . -type f | sort > "$STUB_BUILD_CONTEXT"
@@ -798,6 +804,27 @@ fi
 [ ! -s "$STUB_ARGS" ] || fail "enter without input still entered a container"
 STUB_LS_RUNNING=""
 STUB_LS_ALL=""
+
+# A container that exits normally is already gone (--rm); the launcher must not stop it again.
+reset_stub_files
+run_fixture > "$TMP_ROOT/normal-exit.output" 2>&1 || fail "normal temporary launch failed"
+assert_file_omits "$STUB_CALLS" 'CALL stop' \
+    "a container that exited normally was stopped again"
+
+# Closing the terminal (SIGHUP to the launcher and the attached container run) must
+# not leave the container running unattended in the background.
+reset_stub_files
+STUB_RUN_HANG="$TMP_ROOT/run-hang.pid"
+rm -f "$STUB_RUN_HANG"
+STUB_RUN_HANG="$STUB_RUN_HANG" run_fixture > "$TMP_ROOT/hup.output" 2>&1 &
+hup_job=$!
+for _ in $(seq 1 100); do [ -s "$STUB_RUN_HANG" ] && break; sleep 0.1; done
+[ -s "$STUB_RUN_HANG" ] || fail "the hanging container stub never started"
+launcher_pid="$(pgrep -f "$FIXTURE/ai-box tmp" | head -n 1)" || fail "launcher process not found"
+kill -HUP "$launcher_pid" "$(cat "$STUB_RUN_HANG")"
+wait "$hup_job" || true
+grep -q '^CALL stop aibox-project-' "$STUB_CALLS" \
+    || fail "the launcher did not stop its container after SIGHUP"
 
 # The persistent development machine is created once, then machine run handles both
 # booting a stopped machine and opening its login shell.
