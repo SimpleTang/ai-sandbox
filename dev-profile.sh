@@ -13,3 +13,7 @@ fi
 export CLAUDE_CONFIG_DIR="$aibox_state_dir/claude"
 export CODEX_HOME="$aibox_state_dir/codex"
 unset aibox_state_dir
+# The CLIs are installed system-wide by root (npm -g into /usr/local), so Claude
+# Code's own auto-updater cannot write there and only prints "Auto-update failed:
+# no write permission to npm prefix". Upgrades go through `aibox update`.
+export DISABLE_AUTOUPDATER=1

@@ -394,6 +394,10 @@ assert_file_omits "$STUB_ARGS" 'ANTHROPIC_API_KEY' \
     "unlisted host ANTHROPIC_API_KEY was forwarded"
 assert_arg_pair --label 'com.simpletang.ai-sandbox.managed=true'
 assert_arg_pair --label 'com.simpletang.ai-sandbox.project=project'
+# The CLIs live in root-owned /usr/local; the in-container updater can only fail.
+assert_arg_pair -e 'DISABLE_AUTOUPDATER=1'
+grep -q '^export DISABLE_AUTOUPDATER=1$' "$ROOT/dev-profile.sh" \
+    || fail "the persistent machine profile no longer disables the CLI auto-updater"
 assert_file_omits "$STUB_ARGS" 'CAP_NET_ADMIN' \
     "direct mode unexpectedly requested CAP_NET_ADMIN"
 container_name="$(arg_value_after --name)" || fail "container argv is missing --name"

@@ -2035,6 +2035,10 @@ AIBOX_RUN_ARGS=(
     -e "AIBOX_TZ_SRC=$tz_src"
     -e "AIBOX_LANG=$AIBOX_LANG"
     -e "AIBOX_LANG_SRC=$lang_src"
+    # CLI 由镜像以 root 装在 /usr/local,容器内的 node 用户没有写权限,Claude Code 自动更新
+    # 只会报 "Auto-update failed: no write permission to npm prefix";容器退出即删,装上也留不住。
+    # 版本由镜像固定,升级走宿主机 aibox tmp update。
+    -e "DISABLE_AUTOUPDATER=1"
 )
 if [[ -n "$AIBOX_PROXY" ]]; then
     # entrypoint 只在初始化防火墙时使用;随后会清空 capability bounding set 并撤销 sudo。
