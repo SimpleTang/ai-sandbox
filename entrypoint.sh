@@ -35,7 +35,9 @@ if [[ "${AIBOX_ENTRYPOINT_PHASE:-}" != "user" ]]; then
 
     # IPv6 即使无法通过 sysctl 关闭,代理模式的 ip6tables 仍会阻断直连。
     for _k in all default lo; do
-        printf '1\n' > "/proc/sys/net/ipv6/conf/${_k}/disable_ipv6" 2>/dev/null || true
+        # 重定向按从左到右生效:写成 `> 文件 2>/dev/null` 时,打开文件失败的报错发生在
+        # 2>/dev/null 之前,/proc/sys 只读时仍会刷出 "Read-only file system"。用 { } 包起来再丢弃。
+        { printf '1\n' > "/proc/sys/net/ipv6/conf/${_k}/disable_ipv6"; } 2>/dev/null || true
     done
     if [[ ! -e /proc/sys/net/ipv6/conf/all/disable_ipv6 ]]; then
         AIBOX_IPV6_SHOWN="已关闭(无 IPv6 栈)"
