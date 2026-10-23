@@ -410,6 +410,22 @@ assert_arg_pair -v "$TEST_HOME/.aibox/claude:/home/node/.claude"
 assert_arg_pair -v "$TEST_HOME/.aibox/codex:/home/node/.codex"
 assert_file_omits "$STUB_ARGS" "$FIXTURE/creds" \
     "ephemeral container still mounted credentials from the checkout"
+assert_arg_pair -w '/workspace/project'
+
+# Mounting the whole home must not make the home itself the working directory:
+# Claude Code walks its working directory, and a home's worth of files through
+# virtiofs exhausts the host's file handles. The home stays mounted as usual.
+reset_stub_files
+run_fixture_command tmp "$TEST_HOME" > "$TMP_ROOT/home-cwd.output" 2>&1 \
+    || fail "launching with the home directory as the project failed"
+home_workdir="$(arg_value_after -w)" || fail "container argv is missing -w"
+case "$home_workdir" in
+    /workspace/*/.aibox/home-workdir) ;;
+    *) fail "home launch used $home_workdir as the working directory" ;;
+esac
+[ -d "$TEST_HOME/.aibox/home-workdir" ] || fail "home launch did not create ~/.aibox/home-workdir"
+assert_file_contains "$STUB_ARGS" "$TEST_HOME:${home_workdir%/.aibox/home-workdir}" \
+    "home launch no longer mounted the home directory"
 
 # Legacy login state lives in two places: the checkout's creds/ (temporary containers) and
 # the machine user's own ~/.claude (persistent container). The first launch copies it into

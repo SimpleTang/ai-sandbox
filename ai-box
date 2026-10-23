@@ -2018,6 +2018,21 @@ if (( ${#AIBOX_CUSTOM_ENV_NAMES[@]} > 0 )); then
     MOUNTS+=( -v "$AIBOX_ENV_FILE:/run/aibox/user-env:ro" )
 fi
 
+# 容器内工作目录。挂载的是整个家目录(在 ~ 下直接运行 aibox cc)时,不能把 /workspace/<项目名>
+# 本身当工作目录:Claude Code 启动后会遍历工作目录下的文件,家目录动辄几十万个文件,经 virtiofs
+# 在宿主机上表现为单个容器 10~20 万个打开的文件句柄,同时开几个容器就会耗尽内核 zone 内存,
+# 实测导致 Mac 先大量 jetsam 杀进程、随后 watchdog 重启。这种情况改用家目录下一个专用的空子目录
+# 作为工作目录,家目录里的文件照样可以按 /workspace/<项目名>/... 访问。
+AIBOX_WORK_DIR="/workspace/$PROJECT_NAME"
+if [[ "$HOST_DIR" == "$HOME" ]]; then
+    mkdir -p "$AIBOX_STATE_DIR/home-workdir" || {
+        echo "错误: 无法创建 $AIBOX_STATE_DIR/home-workdir。" >&2
+        exit 1
+    }
+    AIBOX_WORK_DIR="/workspace/$PROJECT_NAME/.aibox/home-workdir"
+    echo "==> 挂载的是整个家目录:工作目录改为 ~/.aibox/home-workdir(避免 Claude Code 遍历整个家目录),家目录文件仍在 /workspace/$PROJECT_NAME 下"
+fi
+
 # 使用单个非空参数数组规避 macOS Bash 3.2 + set -u 的空数组展开问题。
 # AIBOX_PROXY 可能含代理凭据,同样只传变量名,避免值出现在 container 的 argv 中。
 AIBOX_RUN_ARGS=(
@@ -2028,7 +2043,7 @@ AIBOX_RUN_ARGS=(
     --label "$CONTAINER_OWNER_LABEL"
     --label "com.simpletang.ai-sandbox.project=$PROJECT_NAME"
     "${MOUNTS[@]}"
-    -w "/workspace/$PROJECT_NAME"
+    -w "$AIBOX_WORK_DIR"
     -e AIBOX_PROXY
     -e "AIBOX_PROXY_SRC=${proxy_src:-无}"
     -e "AIBOX_TZ=$AIBOX_TZ"
