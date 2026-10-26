@@ -4,6 +4,19 @@
 
 `aibox --version` 显示当前安装的版本。
 
+## [未发布]
+
+本节的修复大多来自 [@rezicwu-sketch](https://github.com/rezicwu-sketch) 在多人共用 Mac mini 的环境中发现并提交的补丁。
+
+English summary: temporary containers that mount the whole home directory (or a parent of it) no longer use it as the working directory, which made Claude Code walk the home at startup and pinned 100k+ open file handles on the Mac per container; `aibox tmp cc` passes the mount to Claude Code with `--add-dir`. Closing the terminal or dropping an SSH session now stops the temporary container instead of leaving it running. The in-container Claude Code auto-updater is disabled, and the IPv6 sysctl no longer prints "Read-only file system" at startup.
+
+### 修复
+
+- 临时容器的挂载目录包含整个家目录（在 `~` 下运行 `aibox tmp cc`，或挂载 `/Users`、`/`）时，工作目录改为空目录 `~/.aibox/home-workdir`，挂载内容仍在 `/workspace/<项目名>` 下。原先 Claude Code 一启动就会遍历整个家目录，宿主机为此给单个容器保留十几万个打开的句柄，同时开几个容器会耗尽内核内存，导致 Mac 大量杀进程甚至自动重启。实测改用空目录后约 2 千。`aibox tmp cc` 会自动加上 `--add-dir /workspace/<项目名>`，家目录里的文件不用逐个确认权限；进入 shell 时会提示手动运行 `claude` 时同样加上这个参数。
+- 关闭终端标签页或 SSH 断开时，启动器会停掉自己的临时容器；以前容器会以无人连接的状态留在后台继续占内存。用 `ssh 主机 "aibox tmp ..."` 直接执行命令再断开的情况仍不能自动处理，见 README「排障」。
+- 关闭容器内 Claude Code 的自动更新（临时容器传入、长期容器在 profile 里导出 `DISABLE_AUTOUPDATER=1`）。CLI 由 root 安装在 `/usr/local`，容器内的用户没有写权限，自动更新只会显示 "Auto-update failed"；升级仍用 `aibox tmp update` / `aibox update`。
+- `/proc/sys` 只读时，入口脚本关闭 IPv6 不再每次打印三行 "Read-only file system"。
+
 ## [0.3.1] - 2026-10-23
 
 aibox 定位为通用的 AI CLI 沙箱：镜像不再内置 JDK / Maven，临时容器不再挂载 Maven / Gradle 缓存。安装向导新增容器资源（内存 / CPU）配置，并能清理旧版留下的 JDK、Maven 包和 Gradle 缓存。

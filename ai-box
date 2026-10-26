@@ -1988,6 +1988,31 @@ if [[ -f "$SANDBOX_DIR/entrypoint.sh" ]]; then
     MOUNTS+=( -v "$AIBOX_TMP_DIR/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro" )
 fi
 
+# 容器内工作目录。挂载目录包含整个家目录(在 ~ 下直接运行 aibox cc,或挂 /Users、/)时,
+# 不能把 /workspace/<项目名> 本身当工作目录:Claude Code 启动时会遍历工作目录。virtiofs 为客户机
+# 缓存的每个 inode 在宿主机 VM 进程里各留一个打开的句柄,客户机内存充足时不回收,临时容器的
+# /proc/sys 只读也无法主动释放。实测单个容器启动 claude 后宿主机句柄约 12 万(空目录约 2 千),
+# 同时开几个容器就会耗尽内核 zone 内存,导致 Mac 先大量 jetsam 杀进程、随后 watchdog 重启。
+# 这种情况改用 ~/.aibox/home-workdir(空目录)作为工作目录,挂载内容照样按 /workspace/<项目名>/...
+# 访问;启动 claude 时再用 --add-dir 授权整个挂载目录,实测不会触发启动时的遍历。
+AIBOX_WORK_DIR="/workspace/$PROJECT_NAME"
+if [[ "$HOST_DIR" == "/" || "$HOME/" == "$HOST_DIR"/* ]]; then
+    mkdir -p "$AIBOX_STATE_DIR/home-workdir" || {
+        echo "错误: 无法创建 $AIBOX_STATE_DIR/home-workdir。" >&2
+        exit 1
+    }
+    AIBOX_HOME_WORKDIR_REL="$AIBOX_STATE_DIR/home-workdir"
+    AIBOX_HOME_WORKDIR_REL="${AIBOX_HOME_WORKDIR_REL#"${HOST_DIR%/}/"}"
+    AIBOX_WORK_DIR="/workspace/$PROJECT_NAME/$AIBOX_HOME_WORKDIR_REL"
+    echo "==> 挂载目录包含整个家目录:工作目录改为 ~/.aibox/home-workdir(避免 Claude Code 启动时遍历),"
+    echo "    挂载内容仍在 /workspace/$PROJECT_NAME 下"
+    if [[ "$LAUNCH" == "claude" ]]; then
+        LAUNCH="claude --add-dir /workspace/$PROJECT_NAME"
+    else
+        echo "    在容器里手动运行 claude 时,加 --add-dir /workspace/$PROJECT_NAME 才能直接读写其中的文件"
+    fi
+fi
+
 # 容器内要执行的命令:
 #   带子命令 -> 先跑目标工具,工具退出后 exec 进交互 shell(读 .bashrc,提示符/代理变量都在)
 #   不带     -> 直接进交互 shell
@@ -2023,21 +2048,6 @@ if (( ${#AIBOX_CUSTOM_ENV_NAMES[@]} > 0 )); then
     done
     unset AIBOX_ENV_INDEX
     MOUNTS+=( -v "$AIBOX_ENV_FILE:/run/aibox/user-env:ro" )
-fi
-
-# 容器内工作目录。挂载的是整个家目录(在 ~ 下直接运行 aibox cc)时,不能把 /workspace/<项目名>
-# 本身当工作目录:Claude Code 启动后会遍历工作目录下的文件,家目录动辄几十万个文件,经 virtiofs
-# 在宿主机上表现为单个容器 10~20 万个打开的文件句柄,同时开几个容器就会耗尽内核 zone 内存,
-# 实测导致 Mac 先大量 jetsam 杀进程、随后 watchdog 重启。这种情况改用家目录下一个专用的空子目录
-# 作为工作目录,家目录里的文件照样可以按 /workspace/<项目名>/... 访问。
-AIBOX_WORK_DIR="/workspace/$PROJECT_NAME"
-if [[ "$HOST_DIR" == "$HOME" ]]; then
-    mkdir -p "$AIBOX_STATE_DIR/home-workdir" || {
-        echo "错误: 无法创建 $AIBOX_STATE_DIR/home-workdir。" >&2
-        exit 1
-    }
-    AIBOX_WORK_DIR="/workspace/$PROJECT_NAME/.aibox/home-workdir"
-    echo "==> 挂载的是整个家目录:工作目录改为 ~/.aibox/home-workdir(避免 Claude Code 遍历整个家目录),家目录文件仍在 /workspace/$PROJECT_NAME 下"
 fi
 
 # 使用单个非空参数数组规避 macOS Bash 3.2 + set -u 的空数组展开问题。

@@ -156,7 +156,7 @@ aibox tmp cc     # 改用用完即删的临时容器，只挂载当前项目
 两种容器的取舍：
 
 - **长期容器**（`aibox`）：适合可信的日常开发。整个宿主 Home 读写挂载，机内安装的软件和系统配置跨停止、重启保留。工作目录必须在宿主 Home 内：显式给出 Home 外的路径会报错并建议改用 `aibox tmp`；当前目录不在 Home 内时自动改为进入 Home 并给出提示。带 `cc` 或 `codex` 时工具退出后留在机内 shell；`exit` 只退出 shell，不会停止长期容器（用 `aibox stop` 停止）。
-- **临时容器**（`aibox tmp`）：适合不完全信任的代码。只挂载指定项目和少数明确的持久化目录，配置代理时有 fail-closed 出口防火墙。带 `cc` 或 `codex` 时工具退出后留在容器 shell；再次执行 `exit` 才会结束并删除该容器。项目文件及持久化目录中的变更不会随容器删除。
+- **临时容器**（`aibox tmp`）：适合不完全信任的代码。只挂载指定项目和少数明确的持久化目录，配置代理时有 fail-closed 出口防火墙。带 `cc` 或 `codex` 时工具退出后留在容器 shell；再次执行 `exit` 才会结束并删除该容器。项目文件及持久化目录中的变更不会随容器删除。关闭终端标签页或 SSH 断开时，启动器会停掉自己的容器。挂载目录包含整个家目录（在 `~` 下运行，或挂载 `/Users`、`/`）时，工作目录改为空目录 `~/.aibox/home-workdir`，挂载内容仍在 `/workspace/<项目名>` 下，`aibox tmp cc` 会自动给 Claude Code 加上 `--add-dir /workspace/<项目名>`；原因见「排障」。
 
 需要 API key、其他自定义环境变量、代理、固定时区或固定语言时，运行 `aibox setup` 按提示生成配置；也可以手动创建：
 
@@ -520,6 +520,8 @@ aibox tmp update codex     # 仅 Codex
 | 升级后 `java` / `mvn` 不见了 | 镜像不再内置 JDK / Maven，见「开发工具链」；已有长期容器里旧镜像带来的 `/opt/java`、`/opt/maven` 还在，但不再自动加入 `PATH` |
 | 长会话卡顿或被 OOM 终止 | 结束并恢复会话；临时容器调大 `aibox.conf` 的 `AIBOX_MEMORY`，长期容器用 `aibox set memory=...` 后 `aibox restart` |
 | `aibox` 报 `AIBOX_MEMORY` 或 `AIBOX_CPUS` 格式不对 | 内存写成带单位的 `8G` / `4096M`，CPU 写正整数；或重跑 `aibox setup` 重新生成 |
+| 同时开几个挂载大目录的容器后，Mac 卡顿、大量进程被杀甚至自动重启 | 宿主机为容器里缓存过的每个文件和目录都保留一个打开的句柄，容器停止前不会释放；以整个家目录为工作目录时，Claude Code 一启动就会让单个容器占用十几万个句柄。启动器已为此改用空的工作目录（见「快速开始」），但在容器里对整个家目录做 grep / find 等大范围遍历，句柄仍会累积。尽量只挂载具体项目，用完及时 `exit`，用 `aibox tmp list` 检查有没有遗留的容器 |
+| 关闭终端或 SSH 断开后临时容器仍在运行 | 先登录再运行 `aibox tmp` 时，启动器会自动停掉容器。用 `ssh 主机 "aibox tmp ..."` 直接执行命令时断开，macOS 不会通知启动器，容器会留在后台：用 `aibox tmp list` 查看，`aibox tmp stop` 停止 |
 | 同名项目的 Claude 状态混合 | 使用不同的目录 basename |
 | 构建无法下载 APT/PyPI/npm 依赖 | 检查 builder 网络和 DNS；本地三方包不会替代这些在线依赖 |
 | 挂载的项目目录在临时容器内为空 | Apple container 的单文件挂载会连带共享其父目录；父目录若同时是另一挂载的源（如挂载沙箱仓库自身时的 `entrypoint.sh`），该目录会静默挂空。`ai-box` 已改挂 entrypoint 启动时快照规避；仍出现则更新宿主端 `ai-box` 或重启 container 服务 |

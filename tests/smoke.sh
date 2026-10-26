@@ -432,6 +432,38 @@ esac
 [ -d "$TEST_HOME/.aibox/home-workdir" ] || fail "home launch did not create ~/.aibox/home-workdir"
 assert_file_contains "$STUB_ARGS" "$TEST_HOME:${home_workdir%/.aibox/home-workdir}" \
     "home launch no longer mounted the home directory"
+assert_file_omits "$STUB_ARGS" '--add-dir' "a plain shell launch passed --add-dir"
+assert_file_contains "$TMP_ROOT/home-cwd.output" "--add-dir ${home_workdir%/.aibox/home-workdir}" \
+    "a plain shell home launch did not explain how to run claude on the mount"
+
+# claude itself gets the mount as an additional directory; otherwise every read or edit
+# of a home file falls outside its working directory and needs a permission prompt.
+reset_stub_files
+run_fixture_command tmp cc "$TEST_HOME" > "$TMP_ROOT/home-cc.output" 2>&1 \
+    || fail "aibox tmp cc on the home directory failed"
+assert_arg_pair -w "$home_workdir"
+assert_file_contains "$STUB_ARGS" "claude --add-dir ${home_workdir%/.aibox/home-workdir}; exec bash" \
+    "aibox tmp cc on the home directory did not add the mount as a claude directory"
+
+# A parent of the home (/Users, /) contains it as well.
+reset_stub_files
+run_fixture_command tmp cc "$TMP_ROOT" > "$TMP_ROOT/home-parent.output" 2>&1 \
+    || fail "launching with a parent of the home directory failed"
+parent_workdir="$(arg_value_after -w)" || fail "container argv is missing -w"
+case "$parent_workdir" in
+    /workspace/*/home/.aibox/home-workdir) ;;
+    *) fail "a parent-of-home launch used $parent_workdir as the working directory" ;;
+esac
+assert_file_contains "$STUB_ARGS" "claude --add-dir ${parent_workdir%/home/.aibox/home-workdir}; exec bash" \
+    "a parent-of-home launch did not add the mount as a claude directory"
+
+# An ordinary project keeps its mount as the working directory and a bare claude.
+reset_stub_files
+run_fixture_command tmp cc "$PROJECT" > "$TMP_ROOT/project-cc.output" 2>&1 \
+    || fail "aibox tmp cc on a project failed"
+assert_arg_pair -w '/workspace/project'
+assert_file_contains "$STUB_ARGS" 'claude; exec bash' "aibox tmp cc on a project changed the claude command"
+assert_file_omits "$STUB_ARGS" '--add-dir' "aibox tmp cc on a project passed --add-dir"
 
 # Legacy login state lives in two places: the checkout's creds/ (temporary containers) and
 # the machine user's own ~/.claude (persistent container). The first launch copies it into
