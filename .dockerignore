@@ -10,7 +10,9 @@
 !dev-configure.sh
 !dev-proxy-run.sh
 !dev-tools.sh
+!dev-cache-trim.sh
 !aibox-dev-proxy.service
+!aibox-dev-cache-trim.service
 !network-lockdown.sh
 !user-exec.sh
 !enter-shell.sh

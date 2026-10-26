@@ -1700,7 +1700,7 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
     } > "$AIBOX_DEV_SYSTEM_FILE"
     mkdir -p "$AIBOX_MACHINE_STAGE"
     for dev_helper in dev-profile.sh dev-shell.sh dev-configure.sh dev-proxy-run.sh dev-tools.sh \
-                      aibox-dev-proxy.service; do
+                      dev-cache-trim.sh aibox-dev-proxy.service aibox-dev-cache-trim.service; do
         if ! cp "$SANDBOX_DIR/$dev_helper" "$AIBOX_MACHINE_STAGE/$dev_helper"; then
             echo "错误: 无法暂存长期容器辅助脚本 ${dev_helper}。" >&2
             exit 1
@@ -1748,7 +1748,8 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
     unset AIBOX_DEV_CUSTOM_NAMES AIBOX_ENV_INDEX
 
     # 长期容器的系统盘不会随镜像重建而更新。每次启动先把仓库里的辅助脚本同步进去
-    # (登录 profile、shell 包装、代理服务、CLI 管理脚本,以及 third_party/gost),
+    # (登录 profile、shell 包装、代理服务、CLI 管理脚本、virtiofs 缓存释放服务,
+    # 以及 third_party/gost),
     # 已有的长期容器无需重建即可用上新行为;
     # 再执行同步后的系统配置脚本。脚本从 ~/.aibox/machine 取,程序目录放在哪里都不影响。
     # container machine run(1.0.0 实测)不按 argv 原样传参,而是把参数用空格拼成一行交给机内 bash
@@ -1777,10 +1778,21 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
             install -m 0755 "$stage/dev-configure.sh" /usr/local/sbin/aibox-dev-configure
             install -m 0755 "$stage/dev-proxy-run.sh" /usr/local/sbin/aibox-dev-proxy-run
             install -m 0755 "$stage/dev-tools.sh" /usr/local/sbin/aibox-dev-tools
-            if ! cmp -s "$stage/aibox-dev-proxy.service" /etc/systemd/system/aibox-dev-proxy.service; then
-                install -m 0644 "$stage/aibox-dev-proxy.service" /etc/systemd/system/aibox-dev-proxy.service
-                systemctl daemon-reload
+            trim_changed=""
+            if [ -r "$stage/dev-cache-trim.sh" ] && ! cmp -s "$stage/dev-cache-trim.sh" /usr/local/sbin/aibox-dev-cache-trim; then
+                install -m 0755 "$stage/dev-cache-trim.sh" /usr/local/sbin/aibox-dev-cache-trim
+                trim_changed=1
             fi
+            units_changed=""
+            for unit in aibox-dev-proxy.service aibox-dev-cache-trim.service; do
+                if [ -r "$stage/$unit" ] && ! cmp -s "$stage/$unit" "/etc/systemd/system/$unit"; then
+                    install -m 0644 "$stage/$unit" "/etc/systemd/system/$unit"
+                    units_changed=1
+                fi
+            done
+            [ -z "$units_changed" ] || systemctl daemon-reload
+            # 缓存释放服务常驻运行,脚本或单元更新后要重启才换成新版;没在运行时由配置脚本启动
+            [ -z "$trim_changed$units_changed" ] || systemctl try-restart aibox-dev-cache-trim.service
         fi
         # 创建长期容器时还没放 gost 的,后补的 gost 也能直接用上
         gost_src="${AIBOX_STATE_DIR:-}/third_party/gost"

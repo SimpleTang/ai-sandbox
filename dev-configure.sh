@@ -25,6 +25,12 @@ if (( systemd_attempt == 30 )); then
 fi
 unset systemd_attempt
 
+# Release cached virtiofs inodes before they pile up (see aibox-dev-cache-trim). Not fatal:
+# without the service the host only keeps more file handles open.
+if ! systemctl enable --now aibox-dev-cache-trim.service >/dev/null 2>&1; then
+    echo "warning: could not enable aibox-dev-cache-trim.service" >&2
+fi
+
 system_tz="${AIBOX_TZ:-UTC}"
 if [[ ! "$system_tz" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]] \
    || [[ ! -e "/usr/share/zoneinfo/$system_tz" ]]; then

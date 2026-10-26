@@ -239,12 +239,18 @@ Choosing between the two:
   suggestion to use `aibox tmp`, and if the current directory is outside it, `aibox` opens your
   home directory instead and prints a notice. With `cc` or `codex`, you stay in the machine shell
   when the tool exits; `exit` leaves that shell but does not stop the persistent container (use
-  `aibox stop` for that).
+  `aibox stop` for that). Once the machine caches more than 50,000 host files, it releases the
+  cache automatically, so a large walk cannot exhaust the Mac's file handles (see
+  Troubleshooting).
 - **Temporary container** (`aibox tmp`): for code you do not fully trust. Only the project and a
   few explicitly persisted directories are mounted, and proxy mode adds a fail-closed egress
   firewall. With `cc` or `codex`, you stay in the container shell when the tool exits; run `exit`
   again to remove the container. Changes made under the mounted project and login state
-  remain on the host.
+  remain on the host. Closing the terminal tab or dropping the SSH session stops the container.
+  When the mount contains the whole home directory (running in `~`, or mounting `/Users` or `/`),
+  the working directory becomes the empty `~/.aibox/home-workdir` while the mount stays under
+  `/workspace/<project>`, and `aibox tmp cc` passes `--add-dir /workspace/<project>` to Claude
+  Code; see Troubleshooting for why.
 
 To use API keys, other custom environment variables, or runtime settings, run `aibox setup` to
 create the configuration interactively, or create a local configuration file by hand:
@@ -751,8 +757,8 @@ Rebuild and sync rules:
   system-disk data you need, run `aibox delete`, and run `aibox` to recreate it. Deleting it does
   not delete files in the mounted host home.
 - Every persistent-container start first copies the helper scripts (`dev-profile.sh`,
-  `dev-shell.sh`, `dev-configure.sh`, `dev-proxy-run.sh`, `dev-tools.sh`,
-  `aibox-dev-proxy.service`) from the program directory into `~/.aibox/machine/`, then, as root,
+  `dev-shell.sh`, `dev-configure.sh`, `dev-proxy-run.sh`, `dev-tools.sh`, `dev-cache-trim.sh`,
+  `aibox-dev-proxy.service`, `aibox-dev-cache-trim.service`) from the program directory into `~/.aibox/machine/`, then, as root,
   installs them from there, together with `~/.aibox/third_party/gost`, into the existing machine.
   Updating aibox or editing these files therefore takes effect on the next start without
   recreating the machine, wherever the program directory is.
@@ -792,6 +798,8 @@ already-built image, so they can differ from that image until a successful rebui
 | A long CLI session becomes slow or is killed | Check host memory pressure; containers request `8192M` by default. Raise `AIBOX_MEMORY` in `aibox.conf` for temporary containers, or run `aibox set memory=...` followed by `aibox restart` for the persistent container. Compact or restart long Claude sessions when appropriate. |
 | `aibox` says `AIBOX_MEMORY` or `AIBOX_CPUS` is malformed | Write memory with a unit (`8G`, `4096M`) and the CPU count as a positive integer, or rerun `aibox setup` to regenerate the file. |
 | `java` / `mvn` disappeared after upgrading | The image no longer includes a JDK or Maven; see [Development Toolchains](#development-toolchains). In an existing persistent container the `/opt/java` and `/opt/maven` from the old image are still there but no longer added to `PATH`. |
+| The Mac stalls, kills many processes or reboots after several containers worked on large mounts | The host keeps one open file handle for every file and directory a container has cached, and the whole Mac shares a limit of about 490,000; once it is full, system processes crash. A grep / find over a large mount caches 10,000–20,000 files per second. In the persistent container, the `aibox-dev-cache-trim` service checks every 2 seconds and releases the cache once it passes 50,000 files (released files are a little slower on their next access); `sudo journalctl -u aibox-dev-cache-trim` lists each release. Temporary containers cannot release it, so handles return only when the container stops: with the whole home as the working directory, Claude Code pinned 100,000+ handles per container at startup, which is why the launcher now uses an empty working directory there. In temporary containers, mount specific projects, do not walk the whole home, `exit` when done, and check `aibox tmp list` for leftovers. |
+| A temporary container keeps running after the terminal closed or SSH dropped | When you log in first and then run `aibox tmp`, the launcher stops its container. If you run it directly with `ssh host "aibox tmp ..."` and the connection drops, macOS does not notify the launcher and the container stays in the background: find it with `aibox tmp list` and stop it with `aibox tmp stop`. |
 | Two projects share Claude state | Give their mounted directories different basenames. |
 | Apple container's builder is stuck | Follow Apple container diagnostics; recreating the builder may discard builder state and should be a deliberate last resort. |
 | The mounted project directory is empty inside a temporary container | Apple container's single-file mounts also share the file's parent directory; when that parent is itself the source of another mount (e.g. `entrypoint.sh` while mounting the sandbox repo as the project), that mount silently comes up empty. `ai-box` avoids this by mounting a launch-time snapshot of `entrypoint.sh`; if it still happens, update the host-side `ai-box` or restart the container service. |

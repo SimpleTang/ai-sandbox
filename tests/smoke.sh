@@ -16,6 +16,7 @@ bash -n \
     "$ROOT/dev-configure.sh" \
     "$ROOT/dev-proxy-run.sh" \
     "$ROOT/dev-tools.sh" \
+    "$ROOT/dev-cache-trim.sh" \
     "$ROOT/clipboard-bridge/install-host.sh" \
     "$ROOT/clipboard-bridge/xclip-shim.sh" \
     "$ROOT/clipboard-bridge/img.sh" \
@@ -98,7 +99,8 @@ mkdir -p "$FIXTURE" "$STUB_BIN" "$TEST_HOME" "$RUN_TMP" "$PROJECT"
 cp "$ROOT/ai-box" "$ROOT/aibox-ui.sh" "$ROOT/Dockerfile" "$ROOT/Dockerfile.dev" "$ROOT/Dockerfile.update" \
     "$ROOT/.dockerignore" "$ROOT/entrypoint.sh" "$ROOT/network-lockdown.sh" "$ROOT/user-exec.sh" \
     "$ROOT/enter-shell.sh" "$ROOT/dev-profile.sh" "$ROOT/dev-shell.sh" "$ROOT/dev-configure.sh" \
-    "$ROOT/dev-proxy-run.sh" "$ROOT/dev-tools.sh" "$ROOT/aibox-dev-proxy.service" "$FIXTURE/"
+    "$ROOT/dev-proxy-run.sh" "$ROOT/dev-tools.sh" "$ROOT/dev-cache-trim.sh" "$ROOT/aibox-dev-proxy.service" \
+    "$ROOT/aibox-dev-cache-trim.service" "$FIXTURE/"
 cp -R "$ROOT/clipboard-bridge" "$FIXTURE/clipboard-bridge"
 
 cat > "$STUB_BIN/container" <<'STUB'
@@ -1289,6 +1291,45 @@ grep -qF '@anthropic-ai/claude-code@latest' "$ROOT/dev-tools.sh" \
 grep -qF '@openai/codex@latest' "$ROOT/dev-tools.sh" \
     || fail "development-machine updater omits Codex"
 
+# The persistent machine releases cached virtiofs inodes (each pins a host file handle)
+# only once they pass the threshold; the drop is global and costs a little speed. The
+# check runs every few seconds: a walk over the Home caches thousands of inodes per
+# second, and a sparse check lets it exhaust the Mac's file table in between.
+grep -qF 'systemctl enable --now aibox-dev-cache-trim.service' "$ROOT/dev-configure.sh" \
+    || fail "the machine configuration does not enable the cache trim service"
+grep -qF 'ExecStart=/usr/local/sbin/aibox-dev-cache-trim' "$ROOT/aibox-dev-cache-trim.service" \
+    || fail "the cache trim service does not run the trim script"
+grep -qx 'Restart=always' "$ROOT/aibox-dev-cache-trim.service" \
+    || fail "the cache trim service is not restarted when it stops"
+grep -qx 'interval=2' "$ROOT/dev-cache-trim.sh" \
+    || fail "the cache trim service does not check every 2 seconds"
+grep -qF 'systemctl enable aibox-dev-cache-trim.service' "$ROOT/Dockerfile.dev" \
+    || fail "the machine image does not enable the cache trim service"
+CACHE_TRIM_SLAB="$TMP_ROOT/slabinfo"
+CACHE_TRIM_DROP="$TMP_ROOT/drop_caches"
+cache_trim() {
+    : > "$CACHE_TRIM_DROP"
+    AIBOX_SLABINFO="$CACHE_TRIM_SLAB" AIBOX_DROP_CACHES="$CACHE_TRIM_DROP" \
+        /bin/bash "$ROOT/dev-cache-trim.sh" --once > "$TMP_ROOT/cache-trim.output" 2>&1
+}
+cat > "$CACHE_TRIM_SLAB" <<'SLAB'
+slabinfo - version: 2.1
+fuse_inode         24761  24768    896   18    4 : tunables    0    0    0 : slabdata   1376   1376      0
+dentry             29464  29652    192   21    1 : tunables    0    0    0 : slabdata   1412   1412      0
+SLAB
+cache_trim || fail "cache trim failed below the threshold"
+[ ! -s "$CACHE_TRIM_DROP" ] || fail "cache trim dropped caches below the threshold"
+sed 's/^fuse_inode         24761/fuse_inode        124761/' "$CACHE_TRIM_SLAB" > "$CACHE_TRIM_SLAB.new"
+mv "$CACHE_TRIM_SLAB.new" "$CACHE_TRIM_SLAB"
+cache_trim || fail "cache trim failed above the threshold"
+assert_file_has_line "$CACHE_TRIM_DROP" '2' "cache trim did not drop dentries and inodes above the threshold"
+assert_file_contains "$TMP_ROOT/cache-trim.output" 'virtiofs cached inodes: 124761 ->' \
+    "cache trim did not log the inode count it acted on"
+grep -v '^fuse_inode' "$CACHE_TRIM_SLAB" > "$CACHE_TRIM_SLAB.new"
+mv "$CACHE_TRIM_SLAB.new" "$CACHE_TRIM_SLAB"
+cache_trim || fail "cache trim failed without a virtiofs mount"
+[ ! -s "$CACHE_TRIM_DROP" ] || fail "cache trim dropped caches without a virtiofs mount"
+
 # Execute the dev environment wrapper with an absolute command. A custom PATH
 # must not prevent the trusted wrapper itself from starting.
 DEV_SHELL_RESULT="$TMP_ROOT/dev-shell.result"
@@ -1501,9 +1542,14 @@ fi
 reset_stub_files
 STUB_MACHINE_LIST="aibox-dev"
 run_fixture_command start > "$TMP_ROOT/stage-machine.output" 2>&1 || fail "start with staged helpers failed"
-for helper in dev-profile.sh dev-shell.sh dev-configure.sh dev-proxy-run.sh dev-tools.sh aibox-dev-proxy.service; do
+for helper in dev-profile.sh dev-shell.sh dev-configure.sh dev-proxy-run.sh dev-tools.sh dev-cache-trim.sh \
+              aibox-dev-proxy.service aibox-dev-cache-trim.service; do
     cmp -s "$FIXTURE/$helper" "$STATE/machine/$helper" || fail "$helper was not staged for the machine"
 done
+assert_file_contains "$STUB_CALLS" '/usr/local/sbin/aibox-dev-cache-trim' \
+    "the root step does not install the cache trim script"
+assert_file_contains "$STUB_CALLS" 'try-restart aibox-dev-cache-trim.service' \
+    "the root step does not restart the running cache trim service after an update"
 assert_file_contains "$STUB_ENV_LOG" "AIBOX_STAGE=$STATE/machine" "the root step did not get the staging directory"
 assert_file_contains "$STUB_CALLS" '$stage/dev-shell.sh' "the root step does not sync from the staging directory"
 assert_file_contains "$STUB_CALLS" '/third_party/gost' "the root step does not sync gost from ~/.aibox"
@@ -2026,7 +2072,8 @@ mkdir -p "$BREW_LIBEXEC" "$BREW/bin" "$BREW/Cellar/aibox/9.9.9/bin"
 cp -R "$SETUP_FIXTURE/." "$BREW_LIBEXEC/"
 cp "$ROOT/.dockerignore" "$ROOT/Dockerfile.update" "$ROOT/network-lockdown.sh" "$ROOT/user-exec.sh" \
     "$ROOT/enter-shell.sh" "$ROOT/dev-profile.sh" "$ROOT/dev-shell.sh" "$ROOT/dev-configure.sh" \
-    "$ROOT/dev-proxy-run.sh" "$ROOT/dev-tools.sh" "$ROOT/aibox-dev-proxy.service" "$BREW_LIBEXEC/"
+    "$ROOT/dev-proxy-run.sh" "$ROOT/dev-tools.sh" "$ROOT/dev-cache-trim.sh" "$ROOT/aibox-dev-proxy.service" \
+    "$ROOT/aibox-dev-cache-trim.service" "$BREW_LIBEXEC/"
 cp -R "$ROOT/clipboard-bridge" "$BREW_LIBEXEC/clipboard-bridge"
 rm -rf "$BREW_LIBEXEC/creds" "$BREW_LIBEXEC/cache"
 ln -s ../libexec/ai-box "$BREW/Cellar/aibox/9.9.9/bin/aibox"

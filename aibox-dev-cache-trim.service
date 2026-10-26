@@ -1,0 +1,11 @@
+[Unit]
+Description=aibox: release cached virtiofs inodes before the host runs out of file handles
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/aibox-dev-cache-trim
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

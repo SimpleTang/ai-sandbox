@@ -155,7 +155,7 @@ aibox tmp cc     # 改用用完即删的临时容器，只挂载当前项目
 
 两种容器的取舍：
 
-- **长期容器**（`aibox`）：适合可信的日常开发。整个宿主 Home 读写挂载，机内安装的软件和系统配置跨停止、重启保留。工作目录必须在宿主 Home 内：显式给出 Home 外的路径会报错并建议改用 `aibox tmp`；当前目录不在 Home 内时自动改为进入 Home 并给出提示。带 `cc` 或 `codex` 时工具退出后留在机内 shell；`exit` 只退出 shell，不会停止长期容器（用 `aibox stop` 停止）。
+- **长期容器**（`aibox`）：适合可信的日常开发。整个宿主 Home 读写挂载，机内安装的软件和系统配置跨停止、重启保留。工作目录必须在宿主 Home 内：显式给出 Home 外的路径会报错并建议改用 `aibox tmp`；当前目录不在 Home 内时自动改为进入 Home 并给出提示。带 `cc` 或 `codex` 时工具退出后留在机内 shell；`exit` 只退出 shell，不会停止长期容器（用 `aibox stop` 停止）。机内缓存的宿主机文件超过 5 万个时会自动释放，避免大范围遍历拖垮宿主机，原因见「排障」。
 - **临时容器**（`aibox tmp`）：适合不完全信任的代码。只挂载指定项目和少数明确的持久化目录，配置代理时有 fail-closed 出口防火墙。带 `cc` 或 `codex` 时工具退出后留在容器 shell；再次执行 `exit` 才会结束并删除该容器。项目文件及持久化目录中的变更不会随容器删除。关闭终端标签页或 SSH 断开时，启动器会停掉自己的容器。挂载目录包含整个家目录（在 `~` 下运行，或挂载 `/Users`、`/`）时，工作目录改为空目录 `~/.aibox/home-workdir`，挂载内容仍在 `/workspace/<项目名>` 下，`aibox tmp cc` 会自动给 Claude Code 加上 `--add-dir /workspace/<项目名>`；原因见「排障」。
 
 需要 API key、其他自定义环境变量、代理、固定时区或固定语言时，运行 `aibox setup` 按提示生成配置；也可以手动创建：
@@ -492,7 +492,7 @@ aibox tmp update codex     # 仅 Codex
 
 - 修改 `Dockerfile`、`network-lockdown.sh`、`LOCALE_GEN` 或 `~/.aibox/third_party/gost` 后运行 `aibox build`（依次构建基础镜像和长期容器镜像）；只用临时容器时 `aibox tmp build` 即可。
 - `aibox build` 不会替换已创建的长期容器：它继续使用自己的系统盘。要整体换用新镜像（例如修改了 `Dockerfile.dev`），先备份系统盘里需要保留的内容，再 `aibox delete` 并运行 `aibox` 重新创建。宿主 Home 中的文件不会随长期容器删除。
-- 每次启动长期容器时，启动器先把程序目录里的辅助脚本（`dev-profile.sh`、`dev-shell.sh`、`dev-configure.sh`、`dev-proxy-run.sh`、`dev-tools.sh`、`aibox-dev-proxy.service`）复制到 `~/.aibox/machine/`，再以 root 从那里连同 `~/.aibox/third_party/gost` 同步进已有的长期容器，因此更新 aibox 或修改这些文件后无需重建，下次启动即生效；程序目录放在哪里都不影响。
+- 每次启动长期容器时，启动器先把程序目录里的辅助脚本（`dev-profile.sh`、`dev-shell.sh`、`dev-configure.sh`、`dev-proxy-run.sh`、`dev-tools.sh`、`dev-cache-trim.sh`、`aibox-dev-proxy.service`、`aibox-dev-cache-trim.service`）复制到 `~/.aibox/machine/`，再以 root 从那里连同 `~/.aibox/third_party/gost` 同步进已有的长期容器，因此更新 aibox 或修改这些文件后无需重建，下次启动即生效；程序目录放在哪里都不影响。
 - 修改 `~/.aibox/aibox.conf` 或宿主端 `ai-box` 后下次启动即可生效；普通 `entrypoint.sh` 修改也会通过快照对临时容器生效，但涉及镜像工具、用户或权限模型时仍须全量重建。
 
 本次引入强制代理防火墙后必须至少执行一次 `aibox build`：旧镜像没有 iptables、专用 gost 用户和 root 初始化入口，不能只靠运行时 entrypoint 快照升级。
@@ -520,7 +520,7 @@ aibox tmp update codex     # 仅 Codex
 | 升级后 `java` / `mvn` 不见了 | 镜像不再内置 JDK / Maven，见「开发工具链」；已有长期容器里旧镜像带来的 `/opt/java`、`/opt/maven` 还在，但不再自动加入 `PATH` |
 | 长会话卡顿或被 OOM 终止 | 结束并恢复会话；临时容器调大 `aibox.conf` 的 `AIBOX_MEMORY`，长期容器用 `aibox set memory=...` 后 `aibox restart` |
 | `aibox` 报 `AIBOX_MEMORY` 或 `AIBOX_CPUS` 格式不对 | 内存写成带单位的 `8G` / `4096M`，CPU 写正整数；或重跑 `aibox setup` 重新生成 |
-| 同时开几个挂载大目录的容器后，Mac 卡顿、大量进程被杀甚至自动重启 | 宿主机为容器里缓存过的每个文件和目录都保留一个打开的句柄，容器停止前不会释放；以整个家目录为工作目录时，Claude Code 一启动就会让单个容器占用十几万个句柄。启动器已为此改用空的工作目录（见「快速开始」），但在容器里对整个家目录做 grep / find 等大范围遍历，句柄仍会累积。尽量只挂载具体项目，用完及时 `exit`，用 `aibox tmp list` 检查有没有遗留的容器 |
+| 同时开几个挂载大目录的容器后，Mac 卡顿、大量进程被杀甚至自动重启 | 宿主机为容器里缓存过的每个文件和目录都保留一个打开的句柄，整个 Mac 共用约 49 万个的上限，用满后系统进程会接连崩溃。在挂载的大目录里做 grep / find 等大范围遍历，每秒能缓存一两万个文件。长期容器里的 `aibox-dev-cache-trim` 服务每 2 秒检查一次，超过 5 万个就释放缓存（被释放的文件下次访问稍慢）；`sudo journalctl -u aibox-dev-cache-trim` 可以看到每次释放的记录。临时容器无法释放，句柄要到容器停止才归还：以整个家目录为工作目录时，Claude Code 一启动就会让单个容器占用十几万个句柄，启动器已为此改用空的工作目录（见「快速开始」）。临时容器尽量只挂载具体项目，不在其中遍历整个家目录，用完及时 `exit`，用 `aibox tmp list` 检查有没有遗留的容器 |
 | 关闭终端或 SSH 断开后临时容器仍在运行 | 先登录再运行 `aibox tmp` 时，启动器会自动停掉容器。用 `ssh 主机 "aibox tmp ..."` 直接执行命令时断开，macOS 不会通知启动器，容器会留在后台：用 `aibox tmp list` 查看，`aibox tmp stop` 停止 |
 | 同名项目的 Claude 状态混合 | 使用不同的目录 basename |
 | 构建无法下载 APT/PyPI/npm 依赖 | 检查 builder 网络和 DNS；本地三方包不会替代这些在线依赖 |
