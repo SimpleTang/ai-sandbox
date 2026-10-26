@@ -4,14 +4,15 @@
 
 `aibox --version` 显示当前安装的版本。
 
-## [未发布]
+## [0.3.2] - 2026-10-26
 
-本节的修复大多来自 [@rezicwu-sketch](https://github.com/rezicwu-sketch) 在多人共用 Mac mini 的环境中发现并提交的补丁。
+本版的修复大多来自 [@rezicwu-sketch](https://github.com/rezicwu-sketch) 在多人共用 Mac mini 的环境中发现并提交的补丁。
 
-English summary: temporary containers that mount the whole home directory (or a parent of it) no longer use it as the working directory, which made Claude Code walk the home at startup and pinned 100k+ open file handles on the Mac per container; `aibox tmp cc` passes the mount to Claude Code with `--add-dir`. Closing the terminal or dropping an SSH session now stops the temporary container instead of leaving it running. The in-container Claude Code auto-updater is disabled, and the IPv6 sysctl no longer prints "Read-only file system" at startup.
+English summary: the persistent container now releases its cached host files every time they pass 50,000 (checked every 2 seconds); each cached file pins an open handle on the Mac, and a large walk could exhaust the Mac's system-wide file table and make it reboot. Temporary containers that mount the whole home directory (or a parent of it) no longer use it as the working directory, which made Claude Code walk the home at startup and pinned 100k+ open file handles on the Mac per container; `aibox tmp cc` passes the mount to Claude Code with `--add-dir`. Closing the terminal or dropping an SSH session now stops the temporary container instead of leaving it running. The in-container Claude Code auto-updater is disabled, and the IPv6 sysctl no longer prints "Read-only file system" at startup.
 
 ### 修复
 
+- 长期容器新增常驻服务 `aibox-dev-cache-trim`：每 2 秒检查一次机内缓存的宿主机文件数，超过 5 万就释放缓存。宿主机为长期容器缓存过的每个文件都保留一个打开的句柄，机内不缺内存就不会主动释放；在挂载的家目录里做大范围遍历每秒能缓存一两万个文件，不到一分钟就能占满整个 Mac 共用的约 49 万个句柄，系统进程随之崩溃、Mac 自动重启。实测 10 万个文件的并行遍历中，句柄峰值只比平时多 4.4 万。被释放的文件下次访问稍慢；`sudo journalctl -u aibox-dev-cache-trim` 可以看到每次释放的记录。服务随启动同步装进已有的长期容器，无需重建。
 - 临时容器的挂载目录包含整个家目录（在 `~` 下运行 `aibox tmp cc`，或挂载 `/Users`、`/`）时，工作目录改为空目录 `~/.aibox/home-workdir`，挂载内容仍在 `/workspace/<项目名>` 下。原先 Claude Code 一启动就会遍历整个家目录，宿主机为此给单个容器保留十几万个打开的句柄，同时开几个容器会耗尽内核内存，导致 Mac 大量杀进程甚至自动重启。实测改用空目录后约 2 千。`aibox tmp cc` 会自动加上 `--add-dir /workspace/<项目名>`，家目录里的文件不用逐个确认权限；进入 shell 时会提示手动运行 `claude` 时同样加上这个参数。
 - 关闭终端标签页或 SSH 断开时，启动器会停掉自己的临时容器；以前容器会以无人连接的状态留在后台继续占内存。用 `ssh 主机 "aibox tmp ..."` 直接执行命令再断开的情况仍不能自动处理，见 README「排障」。
 - 关闭容器内 Claude Code 的自动更新（临时容器传入、长期容器在 profile 里导出 `DISABLE_AUTOUPDATER=1`）。CLI 由 root 安装在 `/usr/local`，容器内的用户没有写权限，自动更新只会显示 "Auto-update failed"；升级仍用 `aibox tmp update` / `aibox update`。

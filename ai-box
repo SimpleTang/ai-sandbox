@@ -51,7 +51,7 @@
 set -euo pipefail
 
 # aibox 自身的版本。发版时与 CHANGELOG.md 的条目和 git tag(v<版本>)保持一致。
-AIBOX_VERSION="0.3.1"
+AIBOX_VERSION="0.3.2"
 
 IMAGE="ai-sandbox:latest"
 DEV_IMAGE="ai-sandbox-dev:latest"
