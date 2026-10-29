@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.aibox.cu-gateway</string>
+
+	<!-- __PYTHON__ / __GATEWAY__ 等由 install-host.sh 在安装时替换。
+	     网关自己不需要屏幕录制 / 辅助功能权限:那两项只授给 CuaDriver.app,
+	     网关通过 open -a 拉起它的常驻进程。 -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON__</string>
+		<string>__GATEWAY__</string>
+		<string>serve</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>AIBOX_CU_STATE</key>
+		<string>__STATE__</string>
+		<key>AIBOX_CU_BIND</key>
+		<string>__BIND__</string>
+		<key>AIBOX_CU_PORT</key>
+		<string>__PORT__</string>
+		<key>AIBOX_CU_APP</key>
+		<string>__APP__</string>
+		<key>AIBOX_CU_LOG_DIR</key>
+		<string>__LOGDIR__</string>
+		<key>PYTHONUNBUFFERED</key>
+		<string>1</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<!-- 异常退出后至少隔 5 秒再拉起,避免配置错误时疯狂重启 -->
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+	<key>StandardErrorPath</key>
+	<string>__LOGDIR__/gateway.log</string>
+</dict>
+</plist>

@@ -41,6 +41,9 @@ complying with each service's terms and with applicable law.
 - Pinned Claude Code and Codex CLI versions with interactive update commands.
 - `aibox clip install` enables a clipboard image bridge so Claude Code inside the sandbox can
   paste images from the macOS clipboard with Ctrl+V.
+- `aibox cu install` enables Mac app control (computer use): Claude Code and Codex in a container
+  can operate the Mac apps you approve, in the background. Terminals, IDEs, browsers, Finder,
+  System Settings and similar apps are always blocked.
 
 ## Compatibility
 
@@ -281,6 +284,7 @@ host's `~/.aibox/` (mode `700`):
 | `versions.env` | CLI versions confirmed by `aibox tmp update` (see [Updates and Rebuilds](#updates-and-rebuilds)) |
 | `machine/` | Helper scripts staged before each persistent-container start; maintained by the launcher |
 | `clipboard/` | Copy of the clipboard watcher made by `aibox clip install` |
+| `cu/` | Mac app control: the gateway token and endpoint, and the always-allowed app list |
 | `.migrated`, `legacy/` | Completion marker and backups of the old login-state migration (see Authentication) |
 
 When upgrading from a release that kept these files in the program directory, the first run of an
@@ -531,6 +535,7 @@ the container can access every path explicitly mounted by `ai-box`:
 | `~/.aibox/claude` and `~/.aibox/codex` | `/home/node/.claude` and `/home/node/.codex` | Persistent authentication and tool state, shared with the persistent container |
 | Launch-time snapshot of `<program dir>/entrypoint.sh` (in a host temporary directory) | `/usr/local/bin/entrypoint.sh` | Read-only runtime entrypoint override |
 | `~/.clipboard-bridge` (only when the clipboard bridge is enabled) | `/run/aibox/clipboard-bridge` | Read-only clipboard images |
+| Launch-time snapshot of `<program dir>/computer-use/aibox-mac-mcp` | `/usr/local/bin/aibox-mac-mcp` | Read-only Mac app control relay |
 
 User commands run as `node`. Direct-mode containers retain passwordless `sudo`; proxy-mode containers
 remove sudo and capabilities after firewall initialization so container code cannot disable the
@@ -543,6 +548,12 @@ drop, removed when `ai-box` exits, and visible as environment variables to user 
 project scripts and AI-generated commands
 before running them. Container isolation reduces accidental host access; it does not make arbitrary
 code trusted.
+
+With Mac app control enabled (`aibox cu install`), containers can operate the Mac apps you approve
+through a gateway on the host, which deliberately reaches outside the sandbox. Temporary containers
+receive the gateway token and endpoint as environment variables, and in proxy mode the firewall
+opens only that one address and port. See [`computer-use/README.md`](computer-use/README.md) for the
+blocked apps, the approval flow and the remaining risks.
 
 Claude groups project state by the container working-directory path. Two host directories with the
 same basename map to the same `/workspace/<name>` and may share Claude project history or memory in
@@ -609,6 +620,13 @@ aibox clip status
 aibox clip restart
 aibox clip doctor
 aibox clip uninstall
+
+# Mac app control (gateway on the host + CuaDriver; applies to both container types)
+aibox cu install       # install CuaDriver, grant permissions, start the gateway, register the MCP server
+aibox cu status        # status; doctor runs every check
+aibox cu apps          # always-allowed apps; allow <app> / revoke <app>
+aibox cu off           # emergency stop; on resumes
+aibox cu update        # upgrade CuaDriver; restart reloads the gateway; uninstall removes it
 ```
 
 `aibox tmp enter`, `stop`, and `logs` resolve their target the same way: a number from the current
@@ -682,6 +700,43 @@ The watcher mirrors **images only, never clipboard text**, so passwords copied f
 manager are never written to disk. See [`clipboard-bridge/README.md`](clipboard-bridge/README.md)
 for the mechanism, architecture diagram, and troubleshooting.
 
+## Mac App Control (computer use)
+
+The Claude desktop app and Codex (in the ChatGPT desktop app) can take screenshots, click and type in
+Mac apps. They only run natively on the Mac: macOS grants Screen Recording and Accessibility to
+approved apps in the GUI session, which a CLI inside a container never is.
+
+`aibox cu install` runs a gateway on the Mac as a LaunchAgent and installs the open-source
+[CuaDriver](https://github.com/trycua/cua) (MIT; aibox pins the version and checks its SHA-256 and
+code signature). Claude Code and Codex in a container then see an MCP server named `mac` and operate
+Mac apps through the gateway, in the background, without taking over your pointer or focus:
+
+```bash
+aibox cu install       # once on macOS; grant CuaDriver Accessibility and Screen Recording when asked
+aibox cu status        # should report the gateway as healthy
+# restart Claude Code / Codex, then ask e.g. "use Calculator to compute 123×4"
+```
+
+- **Approval**: the first time the AI wants an app, the Mac shows a dialog: Deny, This session only,
+  or Always allow. Individual tool calls are not confirmed; the dialog is the human checkpoint.
+  `aibox cu allow` / `revoke` edit the always-allowed list directly.
+- **Always blocked**: terminals and IDEs, browsers, Finder and other system shell apps, System
+  Settings, password managers, scripting tools and launchers, remote-control apps, and AI apps. The
+  list is hard-coded; configuration cannot relax it.
+- **Three layers**: the gateway checks every call (tools, arguments and MCP methods are allowlisted;
+  every action's target pid must belong to an app approved for that session; no foreground input and
+  no arguments that write files on the host); CuaDriver runs in bounded mode and only touches approved
+  apps; Screen Recording and Accessibility belong to `CuaDriver.app` alone. Only apps installed in
+  `/Applications` or the system directories can be approved.
+- **No image rebuild**: the container-side relay is added when a container starts. Temporary
+  containers receive the gateway token and endpoint as environment variables; in proxy mode the
+  firewall opens only the gateway port.
+- **Emergency stop**: `aibox cu off`. The audit log is `~/Library/Logs/aibox-cu/audit.log`.
+
+It needs `/usr/bin/python3` from the Command Line Tools. See
+[`computer-use/README.md`](computer-use/README.md) (Chinese) for the architecture, security model,
+blocked apps, remaining risks and troubleshooting.
+
 ## Development Toolchains
 
 The image includes Claude Code, Codex, and the basics they need (Node.js, Python, git, and common
@@ -711,6 +766,7 @@ java -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8080 \
 brew upgrade aibox                 # Homebrew install
 git -C /path/to/ai-sandbox pull    # git clone
 aibox clip restart                 # if clipboard image pasting is enabled
+aibox cu restart                   # if Mac app control is enabled, load the new gateway
 ```
 
 User data in `~/.aibox` is left untouched by upgrades. See [CHANGELOG.md](CHANGELOG.md) for each
@@ -838,7 +894,8 @@ With Homebrew, replace removing the symlink and the clone below with `brew unins
 1. Stop running temporary containers with `aibox tmp stop --all`, remove stopped ones with
    `aibox tmp clear`, then delete the persistent container and its system disk with `aibox delete`
    if it exists.
-2. If you enabled clipboard image pasting, run `aibox clip uninstall`. Remove the `aibox` symlink
+2. If you enabled clipboard image pasting, run `aibox clip uninstall`; if you enabled Mac app
+   control, run `aibox cu uninstall` (it asks whether to delete `CuaDriver.app`). Remove the `aibox` symlink
    from `$HOME/.local/bin` and remove the completion line from your shell startup file.
 3. Delete the `ai-sandbox:latest` and `ai-sandbox-dev:latest` images with Apple container's
    image-management command if they are no longer needed.
@@ -852,7 +909,7 @@ With Homebrew, replace removing the symlink and the clone below with `brew unins
 
 The original scripts and documentation in this repository are licensed under the [MIT License](LICENSE).
 That license does not relicense Apple container, the base Node/Debian image, Claude Code, Codex CLI,
-`ai-ipcheck`, `gost`, or their dependencies. Their own licenses and
+`ai-ipcheck`, `gost`, [CuaDriver](https://github.com/trycua/cua) (downloaded when Mac app control is enabled), or their dependencies. Their own licenses and
 terms continue to apply:
 
 - [Apple container](https://github.com/apple/container)

@@ -42,9 +42,10 @@ DEV_IMAGE="ai-sandbox-dev:latest"
 BIN_DIR="$HOME/.local/bin"
 LINK_PATH="$BIN_DIR/aibox"
 CLIP_LABEL="com.local.clipbridge"
+CU_LABEL="com.aibox.cu-gateway"
 DEV_MACHINE_NAME="aibox-dev"
 MIGRATED_MARK="$HOME/.aibox/.migrated"
-TOTAL_STEPS=8
+TOTAL_STEPS=9
 
 # gost:与 README 记录的已验证资产一致,校验的是解包后的二进制
 GOST_VERSION="3.2.6"
@@ -981,7 +982,12 @@ env_ask() {
 }
 
 conf_write() {
-    local proxy="$1" tz="$2" lang="$3" memory="$4" cpus="$5" env_block="" entry backup=""
+    local proxy="$1" tz="$2" lang="$3" memory="$4" cpus="$5" env_block="" entry backup="" cu_port=""
+    # 向导不问 Mac 应用控制的端口;原文件里手动设过的值原样带到新文件
+    if [[ -f "$CONF" ]]; then
+        # shellcheck disable=SC1090
+        cu_port="$( (AIBOX_CU_PORT=""; source "$CONF" >/dev/null 2>&1; printf '%s' "${AIBOX_CU_PORT:-}") || true)"
+    fi
     for entry in "${NEW_ENV[@]+"${NEW_ENV[@]}"}"; do
         env_block="$env_block  $(sq "$entry")"$'\n'
     done
@@ -995,12 +1001,14 @@ conf_write() {
             "$(date '+%Y-%m-%d %H:%M')"
         W_PROXY="$(sq "$proxy")" W_TZ="$(sq "$tz")" W_LANG="$(sq "$lang")" \
         W_MEMORY="$(sq "$memory")" W_CPUS="$(sq "$cpus")" W_ENV="$env_block" \
+        W_CU_PORT="$(sq "$cu_port")" \
             awk '
                 /^AIBOX_PROXY=/      { print "AIBOX_PROXY=" ENVIRON["W_PROXY"]; next }
                 /^AIBOX_TZ=/         { print "AIBOX_TZ=" ENVIRON["W_TZ"]; next }
                 /^AIBOX_LANG=/       { print "AIBOX_LANG=" ENVIRON["W_LANG"]; next }
                 /^AIBOX_MEMORY=/     { print "AIBOX_MEMORY=" ENVIRON["W_MEMORY"]; next }
                 /^AIBOX_CPUS=/       { print "AIBOX_CPUS=" ENVIRON["W_CPUS"]; next }
+                /^AIBOX_CU_PORT=/    { print "AIBOX_CU_PORT=" ENVIRON["W_CU_PORT"]; next }
                 /^AIBOX_ENV_VARS=\(/ { in_env = 1 }
                 in_env && /^\)/      { printf "%s", ENVIRON["W_ENV"]; in_env = 0 }
                 { print }
@@ -1420,6 +1428,29 @@ step_clip() {
     fi
 }
 
+# ---- 第 9 步:Mac 应用控制 ----
+step_cu() {
+    step 9 "Mac 应用控制(computer use,可选)"
+    if launchctl print "gui/$(id -u)/$CU_LABEL" >/dev/null 2>&1; then
+        ok "已启用(aibox cu status 查看,aibox cu off 急停)"
+        return 0
+    fi
+    info "启用后,容器里的 Claude Code / Codex 多一个名为 mac 的 MCP 服务,可以在后台操作 Mac 上的应用。"
+    info "会安装开源的 CuaDriver(trycua/cua,约 85 MB)并给它屏幕录制、辅助功能权限;"
+    info "AI 每用一个新应用都要你在 Mac 上确认,终端、IDE、浏览器、Finder、系统设置等一律禁止。"
+    if (( CHECK_ONLY )); then
+        info "未启用。需要时运行 aibox cu install。"
+        return 0
+    fi
+    if ui_yn "启用?" N; then
+        if bash "$AIBOX" cu install; then
+            ok "已启用"
+        else
+            warn "启用没有完成,可以稍后运行 aibox cu install 重试,或 aibox cu doctor 排查。"
+        fi
+    fi
+}
+
 finish() {
     local item cmd="aibox"
     echo
@@ -1457,7 +1488,7 @@ main() {
         info "只检查,不做任何修改。"
     else
         info "依次完成:检查 Mac 环境 → 安装 Apple container → 启动服务 → 安装 aibox 命令"
-        info "          → 运行配置 → 迁移旧版数据 → 构建镜像 → 剪贴板贴图(可选)"
+        info "          → 运行配置 → 迁移旧版数据 → 构建镜像 → 剪贴板贴图(可选)→ Mac 应用控制(可选)"
         info "已完成的步骤会自动跳过;随时可以 Ctrl+C 退出,重新运行会从未完成处继续。"
     fi
     if (( CHECK_ONLY )); then
@@ -1482,6 +1513,7 @@ main() {
     step_migrate
     step_build
     step_clip
+    step_cu
     if finish; then
         exit 0
     fi

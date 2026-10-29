@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""aibox-mac-mcp:容器里的 MCP stdio 服务,把消息原样转给宿主机上的 aibox computer use 网关。
+
+Claude Code / Codex 以 stdio 方式启动它(MCP 服务名 mac,由宿主机上的 aibox cu install 注册)。
+连接参数按顺序取:
+  AIBOX_CU_ENDPOINT / AIBOX_CU_TOKEN 环境变量(临时容器由 aibox 传入)
+  <状态目录>/cu/client/endpoint、token(长期容器;状态目录取自 AIBOX_STATE_DIR 或 /etc/aibox/state-dir,
+  即宿主机的 ~/.aibox)
+  端点缺省为容器默认网关的 47123 端口
+网关没装、已急停或 token 不对时,降级成一个不提供工具的最小 MCP 服务,只说明原因,
+免得 MCP 客户端反复报连接失败。
+"""
+
+import json
+import os
+import socket
+import struct
+import sys
+import threading
+
+PROTO = "AIBOX-CU1"
+DEFAULT_PORT = 47123
+
+
+def state_dir():
+    if os.environ.get("AIBOX_STATE_DIR"):
+        return os.environ["AIBOX_STATE_DIR"]
+    try:
+        with open("/etc/aibox/state-dir", encoding="utf-8") as f:
+            line = f.readline().strip()
+            if line:
+                return line
+    except OSError:
+        pass
+    return os.path.join(os.path.expanduser("~"), ".aibox")
+
+
+def read_client_file(name):
+    try:
+        with open(os.path.join(state_dir(), "cu", "client", name), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def default_gateway():
+    try:
+        with open("/proc/net/route", encoding="ascii") as f:
+            next(f)
+            for line in f:
+                fields = line.split()
+                if len(fields) > 2 and fields[1] == "00000000":
+                    return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
+    except (OSError, ValueError, StopIteration):
+        pass
+    return ""
+
+
+def endpoint():
+    value = os.environ.get("AIBOX_CU_ENDPOINT") or read_client_file("endpoint")
+    if not value:
+        gw = default_gateway()
+        value = "%s:%d" % (gw, DEFAULT_PORT) if gw else ""
+    host, _, port = value.rpartition(":")
+    try:
+        return host, int(port)
+    except ValueError:
+        return "", 0
+
+
+def label():
+    return os.environ.get("AIBOX_CONTAINER") or socket.gethostname() or "container"
+
+
+def connect():
+    """连上网关并完成握手;返回 (socket, 已多读的数据, None) 或 (None, None, 原因)。"""
+    token = os.environ.get("AIBOX_CU_TOKEN") or read_client_file("token")
+    if not token:
+        return None, None, "没有找到网关 token:Mac 应用控制未启用。在 Mac 上运行 aibox cu install 启用。"
+    host, port = endpoint()
+    if not host:
+        return None, None, "找不到网关地址。在 Mac 上运行 aibox cu doctor 排查。"
+    try:
+        sock = socket.create_connection((host, port), timeout=5)
+    except OSError as e:
+        return None, None, ("连不上 Mac 上的网关 %s:%d(%s)。网关没有运行或已急停:在 Mac 上运行 "
+                            "aibox cu status 查看,aibox cu on 恢复。" % (host, port, e))
+    try:
+        sock.sendall(("%s %s %s\n" % (PROTO, token, label())).encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError as e:
+        sock.close()
+        return None, None, "与网关握手失败:%s" % e
+    line, _, rest = buf.partition(b"\n")
+    if line.decode("utf-8", "replace").strip() != "%s OK" % PROTO:
+        sock.close()
+        return None, None, ("网关拒绝了连接(token 不对)。在 Mac 上重新运行 aibox cu install,"
+                            "然后重启 Claude Code / Codex。")
+    sock.settimeout(None)
+    return sock, rest, None
+
+
+def relay(sock, rest):
+    def upstream():
+        try:
+            while True:
+                data = os.read(0, 65536)
+                if not data:
+                    break
+                sock.sendall(data)
+        except OSError:
+            pass
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+    threading.Thread(target=upstream, daemon=True).start()
+    out = sys.stdout.buffer
+    if rest:
+        out.write(rest)
+        out.flush()
+    while True:
+        try:
+            data = sock.recv(65536)
+        except OSError:
+            break
+        if not data:
+            break
+        out.write(data)
+        out.flush()
+
+
+def stub(reason):
+    """不提供工具的最小 MCP 服务:只在 initialize 的说明里告诉 agent 为什么不可用。"""
+    sys.stderr.write("aibox-mac-mcp: %s\n" % reason)
+    out = sys.stdout
+    for raw in sys.stdin:
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(msg, dict) or "id" not in msg or "method" not in msg:
+            continue
+        method, mid = msg["method"], msg["id"]
+        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        meta = params.get("_meta") if isinstance(params.get("_meta"), dict) else {}
+        # 无状态的新版协议(2026-07-28 起):不发 initialize,改发 server/discover,结果要带 resultType
+        stateless = "io.modelcontextprotocol/protocolVersion" in meta
+        info = {"name": "aibox-mac (unavailable)", "version": "1"}
+        note = "[aibox] Mac 应用控制当前不可用:" + reason
+        if method == "initialize":
+            version = params.get("protocolVersion") or "2025-06-18"
+            result = {"protocolVersion": version, "capabilities": {"tools": {}},
+                      "serverInfo": info, "instructions": note}
+        elif method == "server/discover":
+            result = {"_meta": {"io.modelcontextprotocol/serverInfo": info},
+                      "capabilities": {"tools": {}}, "instructions": note}
+        elif method == "tools/list":
+            result = {"tools": []}
+        elif method == "ping":
+            result = {}
+        else:
+            out.write(json.dumps({"jsonrpc": "2.0", "id": mid,
+                                  "error": {"code": -32601, "message": reason}}, ensure_ascii=False) + "\n")
+            out.flush()
+            continue
+        if stateless:
+            result["resultType"] = "complete"
+        out.write(json.dumps({"jsonrpc": "2.0", "id": mid, "result": result}, ensure_ascii=False) + "\n")
+        out.flush()
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ("--check", "check"):
+        sock, _, reason = connect()
+        if sock:
+            sock.close()
+            host, port = endpoint()
+            print("网关可用:%s:%d" % (host, port))
+            return 0
+        print(reason)
+        return 1
+    sock, rest, reason = connect()
+    if sock is None:
+        stub(reason)
+        return 0
+    relay(sock, rest)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -20,12 +20,31 @@ bash -n \
     "$ROOT/clipboard-bridge/install-host.sh" \
     "$ROOT/clipboard-bridge/xclip-shim.sh" \
     "$ROOT/clipboard-bridge/img.sh" \
-    "$ROOT/clipboard-bridge/diagnose.sh"
+    "$ROOT/clipboard-bridge/diagnose.sh" \
+    "$ROOT/computer-use/install-host.sh"
 
 # The JXA watcher is JavaScript, not shell. Check it when a JS engine is around.
 if command -v node >/dev/null 2>&1; then
     node --check "$ROOT/clipboard-bridge/clipbridge.js" >/dev/null \
         || { echo "clipbridge.js failed a JavaScript syntax check" >&2; exit 1; }
+fi
+
+# Mac app control (aibox cu): the gateway runs under the Command Line Tools python3 on macOS (3.9),
+# the relay under the image's python3. Check both against 3.9 syntax, then run the unit tests
+# for the gateway policy, the bounded manifest, MCP registration and the relay.
+if command -v python3 >/dev/null 2>&1; then
+    python3 - "$ROOT/computer-use/gateway.py" "$ROOT/computer-use/aibox-mac-mcp" <<'PY' \
+        || { echo "computer-use python files failed a Python 3.9 syntax check" >&2; exit 1; }
+import ast, sys
+for path in sys.argv[1:]:
+    with open(path, encoding="utf-8") as f:
+        ast.parse(f.read(), path, feature_version=(3, 9))
+PY
+    if ! cu_test_output="$(PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/tests/cu_gateway_test.py" 2>&1)"; then
+        printf '%s\n' "$cu_test_output" >&2
+        echo "computer-use unit tests failed" >&2
+        exit 1
+    fi
 fi
 
 help_output="$($ROOT/ai-box --help)"
@@ -35,6 +54,11 @@ case "$help_output" in
         echo "ai-box help output is missing expected commands" >&2
         exit 1
         ;;
+esac
+
+case "$help_output" in
+    *"aibox cu install"*) ;;
+    *) echo "ai-box help output is missing aibox cu" >&2; exit 1 ;;
 esac
 
 test -f "$ROOT/README.md"
@@ -102,6 +126,7 @@ cp "$ROOT/ai-box" "$ROOT/aibox-ui.sh" "$ROOT/Dockerfile" "$ROOT/Dockerfile.dev" 
     "$ROOT/dev-proxy-run.sh" "$ROOT/dev-tools.sh" "$ROOT/dev-cache-trim.sh" "$ROOT/aibox-dev-proxy.service" \
     "$ROOT/aibox-dev-cache-trim.service" "$FIXTURE/"
 cp -R "$ROOT/clipboard-bridge" "$FIXTURE/clipboard-bridge"
+cp -R "$ROOT/computer-use" "$FIXTURE/computer-use"
 
 cat > "$STUB_BIN/container" <<'STUB'
 #!/usr/bin/env bash
@@ -247,6 +272,7 @@ done
 {
     printf 'PATH=%s\n' "$PATH"
     printf 'HOME=%s\n' "$HOME"
+    printf 'AIBOX_CU_TOKEN=%s\n' "${AIBOX_CU_TOKEN-<unset>}"
 } > "$STUB_HOST_ENV"
 
 if [ -n "$env_file" ]; then
@@ -1546,6 +1572,10 @@ for helper in dev-profile.sh dev-shell.sh dev-configure.sh dev-proxy-run.sh dev-
               aibox-dev-proxy.service aibox-dev-cache-trim.service; do
     cmp -s "$FIXTURE/$helper" "$STATE/machine/$helper" || fail "$helper was not staged for the machine"
 done
+cmp -s "$FIXTURE/computer-use/aibox-mac-mcp" "$STATE/machine/aibox-mac-mcp" \
+    || fail "the aibox cu relay was not staged for the machine"
+assert_file_contains "$STUB_CALLS" '/usr/local/bin/aibox-mac-mcp' \
+    "the root step does not install the aibox cu relay"
 assert_file_contains "$STUB_CALLS" '/usr/local/sbin/aibox-dev-cache-trim' \
     "the root step does not install the cache trim script"
 assert_file_contains "$STUB_CALLS" 'try-restart aibox-dev-cache-trim.service' \
@@ -1602,6 +1632,66 @@ if run_fixture_command clip bogus > "$TMP_ROOT/clip-bogus.output" 2>&1; then
 fi
 assert_file_contains "$TMP_ROOT/clip-bogus.output" 'install|uninstall|status|restart' \
     "aibox clip did not print its usage line for an unknown action"
+
+# ---- Mac app control (aibox cu) ----
+# The relay snapshot is always mounted into temporary containers (old images lack it); without
+# the gateway's client files nothing else is injected and the relay answers "unavailable".
+CU_STATE="$STATE/cu"
+rm -rf "$CU_STATE"
+reset_stub_files
+run_fixture > "$TMP_ROOT/cu-absent.output" 2>&1 || fail "launch without aibox cu failed"
+grep -q ':/usr/local/bin/aibox-mac-mcp:ro$' "$STUB_ARGS" \
+    || fail "the aibox cu relay snapshot was not mounted into the temporary container"
+assert_file_omits "$STUB_ARGS" 'AIBOX_CU_' "aibox cu variables were injected without the gateway installed"
+
+# With the gateway installed the endpoint travels as a value, the token only by name: its value
+# comes from the launcher's environment and never appears in container's argv.
+mkdir -p "$CU_STATE/client"
+printf 'smoke-cu-token-must-not-leak\n' > "$CU_STATE/client/token"
+printf '192.168.64.1:47123\n' > "$CU_STATE/client/endpoint"
+reset_stub_files
+run_fixture > "$TMP_ROOT/cu-present.output" 2>&1 || fail "launch with aibox cu failed"
+assert_arg_pair -e 'AIBOX_CU_TOKEN'
+assert_arg_pair -e 'AIBOX_CU_ENDPOINT=192.168.64.1:47123'
+assert_file_omits "$STUB_ARGS" 'smoke-cu-token-must-not-leak' "the aibox cu token leaked into container's argv"
+assert_file_has_line "$STUB_HOST_ENV" 'AIBOX_CU_TOKEN=smoke-cu-token-must-not-leak' \
+    "the aibox cu token was not exported to container run"
+
+# After aibox cu off the launcher stops handing out the endpoint.
+: > "$CU_STATE/disabled"
+reset_stub_files
+run_fixture > "$TMP_ROOT/cu-disabled.output" 2>&1 || fail "launch with aibox cu disabled failed"
+assert_file_omits "$STUB_ARGS" 'AIBOX_CU_ENDPOINT' "the endpoint was injected while aibox cu was off"
+rm -rf "$CU_STATE"
+
+# In proxy mode the entrypoint opens the firewall for exactly the gateway endpoint.
+assert_file_contains "$ROOT/entrypoint.sh" '-I AIBOX_OUTPUT 1 -d "${BASH_REMATCH[1]}" -p tcp --dport "${BASH_REMATCH[2]}" -j ACCEPT' \
+    "the entrypoint does not open the firewall for the aibox cu gateway"
+
+# aibox cu rejects unknown actions with its usage line, and refuses a bad port.
+if run_fixture_command cu bogus > "$TMP_ROOT/cu-bogus.output" 2>&1; then
+    fail "aibox cu accepted an unknown action"
+fi
+assert_file_contains "$TMP_ROOT/cu-bogus.output" 'aibox cu [install|status' \
+    "aibox cu did not print its usage line for an unknown action"
+if AIBOX_CU_PORT=99999 run_fixture_command cu status > "$TMP_ROOT/cu-port.output" 2>&1; then
+    fail "aibox cu accepted an out-of-range port"
+fi
+assert_file_contains "$TMP_ROOT/cu-port.output" 'AIBOX_CU_PORT' "aibox cu did not explain the bad port"
+
+# The gateway's launch agent template renders into a valid plist with every placeholder filled.
+cu_plist="$TMP_ROOT/cu-gateway.plist"
+sed -e 's|__PYTHON__|/usr/bin/python3|g' -e 's|__GATEWAY__|/opt/aibox/computer-use/gateway.py|g' \
+    -e 's|__STATE__|/Users/u/.aibox/cu|g' -e 's|__BIND__|192.168.64.1|g' -e 's|__PORT__|47123|g' \
+    -e 's|__APP__|/Applications/CuaDriver.app|g' -e 's|__LOGDIR__|/Users/u/Library/Logs/aibox-cu|g' \
+    "$ROOT/computer-use/com.aibox.cu-gateway.plist" > "$cu_plist"
+assert_file_omits "$cu_plist" '__' "the aibox cu launch agent template left a placeholder"
+if command -v plutil >/dev/null 2>&1; then
+    plutil -lint "$cu_plist" >/dev/null || fail "the aibox cu launch agent is not a valid plist"
+elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import plistlib,sys; plistlib.load(open(sys.argv[1],"rb"))' "$cu_plist" \
+        || fail "the aibox cu launch agent is not a valid plist"
+fi
 
 # The launch agent must name the interpreter that matches the watcher it points
 # at, otherwise osascript compiles JavaScript as AppleScript and the agent dies.
@@ -1916,7 +2006,7 @@ printf '%s\n' \
     '6' 'x' '16' '4' \
     '2' "$SETUP_KEY_INPUT" 'ftp://nope' '' '' \
     'y' \
-    'n' \
+    'n' 'n' \
     | SETUP_CURL_CODE=401 \
       SETUP_CURL_BODY='{"type":"error","error":{"type":"authentication_error","message":"x-api-key header is required"}}' \
       run_setup > "$TMP_ROOT/setup-first.output" 2>&1 && setup_status=0 || setup_status=$?
@@ -1969,7 +2059,7 @@ assert_arg_pair --cpus 4
 
 # A second run skips finished steps and must not duplicate profile lines or touch the config.
 cp -p "$SETUP_HOME/.aibox/aibox.conf" "$TMP_ROOT/setup-conf.before"
-printf '%s\n' '' 'n' 'n' \
+printf '%s\n' '' 'n' 'n' 'n' \
     | run_setup > "$TMP_ROOT/setup-second.output" 2>&1 && setup_status=0 || setup_status=$?
 [ "$setup_status" -eq 1 ] || fail "second setup run should still report gost (status $setup_status)"
 [ "$(grep -cxF 'export PATH="$HOME/.local/bin:$PATH"' "$SETUP_HOME/.zshrc")" -eq 1 ] \
@@ -2001,7 +2091,7 @@ printf '%s\n' \
     '' '' 'https://relay.example.invalid/api' '' \
     '' \
     'y' \
-    'n' \
+    'n' 'n' \
     | SETUP_CURL_CODE=404 SETUP_CURL_BODY='Not Found' \
       run_setup > "$TMP_ROOT/setup-third.output" 2>&1 && setup_status=0 || setup_status=$?
 [ "$setup_status" -eq 1 ] || fail "third setup run should still report gost (status $setup_status)"
@@ -2039,7 +2129,7 @@ printf '%s\n' \
     '1' '1' \
     '1' '' \
     'y' \
-    'n' \
+    'n' 'n' \
     | run_setup > "$TMP_ROOT/setup-fourth.output" 2>&1 \
     || fail "setup should be complete after switching to direct mode"
 printf '%s\n' 'PROXY=' 'TZ=' 'LANG=' 'MEMORY=' 'CPUS=' 'ENV=CUSTOM_KEEP=kept value' \
@@ -2087,7 +2177,7 @@ PATH="$STUB_BIN:$ORIGINAL_PATH" "$BREW/bin/aibox" --version | grep -q '(Homebrew
 # the brew one, and the completion line still points at the clone. Both get fixed; the old
 # completion line is commented out, not deleted.
 [ -L "$SETUP_HOME/.local/bin/aibox" ] || fail "test setup: the clone link from earlier cases is missing"
-printf '%s\n' 'y' 'y' 'n' 'n' | (
+printf '%s\n' 'y' 'y' 'n' 'n' 'n' | (
     export HOME="$SETUP_HOME" SHELL=/bin/zsh LANG=en_US.UTF-8 NO_COLOR=1 TMPDIR="$RUN_TMP"
     export PATH="$SETUP_HOME/.local/bin:$BREW/bin:$SETUP_BIN:$HOST_STUB_PATH"
     export STUB_ARGS STUB_CALLED STUB_ENV_COPY STUB_ENV_PATH STUB_ENV_MODE STUB_HOST_ENV

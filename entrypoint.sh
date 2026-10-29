@@ -76,6 +76,11 @@ if [[ "${AIBOX_ENTRYPOINT_PHASE:-}" != "user" ]]; then
         gost_uid="$(id -u aibox-gost)"
         gost_gid="$(id -g aibox-gost)"
         /usr/local/sbin/aibox-network-lockdown "$gost_uid"
+        # Mac 应用控制(aibox cu):只放行到宿主机网关的这一个 IPv4 地址和端口,插在拒绝规则之前。
+        # 网关自己要求 token,且只有容器网络能连到它。
+        if [[ "${AIBOX_CU_ENDPOINT:-}" =~ ^([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+):([0-9]+)$ ]]; then
+            iptables -w -I AIBOX_OUTPUT 1 -d "${BASH_REMATCH[1]}" -p tcp --dport "${BASH_REMATCH[2]}" -j ACCEPT
+        fi
 
         # gost 是唯一可访问外网的 UID;日志不回显,避免上游 URL 或账密泄漏。
         case "$AIBOX_PROXY" in

@@ -31,6 +31,7 @@
 #   —— 通用 ——
 #   ai-box status               # 一屏自检:服务 / 镜像 / 长期容器 / 临时容器
 #   ai-box clip ...             # 剪贴板贴图(两种容器都生效)
+#   ai-box cu ...               # Mac 应用控制(computer use;两种容器都生效)
 #   ai-box help                 # 命令速查(也认 -h / --help)
 #   ai-box --version            # 显示 aibox 自身的版本(也认 -V)
 #
@@ -51,7 +52,7 @@
 set -euo pipefail
 
 # aibox 自身的版本。发版时与 CHANGELOG.md 的条目和 git tag(v<版本>)保持一致。
-AIBOX_VERSION="0.3.2"
+AIBOX_VERSION="0.4.0"
 
 IMAGE="ai-sandbox:latest"
 DEV_IMAGE="ai-sandbox-dev:latest"
@@ -286,6 +287,10 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
   aibox clip install           在 macOS 上启用剪贴板图片桥接(两种容器都生效)
   aibox clip status            查看桥接状态;uninstall 卸载,restart 重启监听
   aibox clip doctor            贴不上图时的诊断(在 macOS 前台重跑一遍监听的动作)
+  aibox cu install             让容器里的 Claude Code / Codex 控制 Mac 上的应用(computer use)
+  aibox cu status | doctor     查看状态 / 逐项诊断
+  aibox cu apps                列出「总是允许」的应用;allow <应用> / revoke <应用> 增删
+  aibox cu off | on            急停 / 恢复;update 升级驱动,restart 重载网关,uninstall 卸载
   aibox help                   显示本帮助(也认 -h / --help)
   aibox --version              显示 aibox 自身的版本(也认 -V;容器内 CLI 的版本用 aibox version)
 
@@ -296,6 +301,8 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
   · Claude / Codex 的登录状态在 ~/.aibox/,两种容器共用,与 Mac 本机 CLI 的 ~/.claude 分开。
   · 容器里 Claude Code 要贴宿主机剪贴板里的图,先 aibox clip install,然后按 Ctrl+V
     (不是 ⌘V —— ⌘V 会被终端截走当文本粘贴)。详见 clipboard-bridge/README.md。
+  · Mac 应用控制:aibox cu install 后,容器里多一个名为 mac 的 MCP 服务;AI 要用某个应用时,
+    Mac 上会弹确认框。终端、IDE、浏览器、Finder、系统设置等被禁止控制。详见 computer-use/README.md。
   · Tab 补全:在 ~/.zshrc 或 ~/.bashrc 里 source "$AIBOX_STABLE_DIR/ai-box-completion.sh"
   · 代理/时区/语言/资源/自定义环境变量在 "$AIBOX_CONF" 配(aibox setup 可交互生成)。
     资源(AIBOX_MEMORY / AIBOX_CPUS)对长期容器只在首次创建时生效,之后用 aibox set 调整。
@@ -368,6 +375,29 @@ if [[ "${1:-}" == "clip" ]]; then
         exit 1
     fi
     exec "$clip_installer" "$clip_action"
+fi
+
+# ---- 子命令:cu —— Mac 应用控制(computer use)的宿主机侧 ----
+# 宿主机上常驻一个网关(LaunchAgent),容器里的 aibox-mac-mcp 经它控制 Mac 上已授权的应用;
+# 屏幕录制 / 辅助功能权限只授给 CuaDriver.app。容器侧的转发器在启动容器时放进去,不需要重建镜像。
+# 架构与安全模型见 computer-use/README.md。
+if [[ "${1:-}" == "cu" ]]; then
+    shift
+    cu_installer="$SANDBOX_DIR/computer-use/install-host.sh"
+    [[ -x "$cu_installer" ]] || { echo "错误: 找不到可执行的 $cu_installer" >&2; exit 1; }
+    # 端口:环境变量 > aibox.conf 的 AIBOX_CU_PORT > 47123。在子 shell 里读配置,不影响其余变量。
+    cu_port="${AIBOX_CU_PORT:-}"
+    if [[ -z "$cu_port" && -f "$AIBOX_CONF" ]]; then
+        # shellcheck disable=SC1090
+        cu_port="$( (AIBOX_CU_PORT=""; source "$AIBOX_CONF" >/dev/null 2>&1; printf '%s' "${AIBOX_CU_PORT:-}") || true)"
+    fi
+    cu_port="${cu_port:-47123}"
+    if [[ ! "$cu_port" =~ ^[1-9][0-9]{0,4}$ ]] || (( cu_port > 65535 )); then
+        echo "错误: AIBOX_CU_PORT='$cu_port' 不是合法端口。" >&2
+        exit 1
+    fi
+    AIBOX_STATE_DIR="$AIBOX_STATE_DIR" AIBOX_STABLE_DIR="$AIBOX_STABLE_DIR" AIBOX_CU_PORT="$cu_port" \
+        exec "$cu_installer" "$@"
 fi
 
 # ---- 模式切分 ----
@@ -625,6 +655,28 @@ aibox_clip_status_line() {
         printf '已启用,当前剪贴板有图(沙箱里按 Ctrl+V 粘贴)\n'
     else
         printf '已启用,当前剪贴板无图\n'
+    fi
+}
+
+# ---- Mac 应用控制:状态自检(aibox status 用)----
+# 纯只读:不启动驱动、不连网关之外的东西。详细状态用 aibox cu status / doctor。
+aibox_cu_status_line() {
+    local cu_dir="$AIBOX_STATE_DIR/cu"
+    local plist="$HOME/Library/LaunchAgents/com.aibox.cu-gateway.plist"
+    local endpoint
+    if [[ ! -f "$plist" ]]; then
+        printf '未启用(aibox cu install 后容器里的 AI 可以控制 Mac 上授权的应用)\n'
+    elif [[ -f "$cu_dir/disabled" ]]; then
+        printf '已急停(aibox cu on 恢复)\n'
+    elif ! launchctl print "gui/$(id -u)/com.aibox.cu-gateway" >/dev/null 2>&1; then
+        printf '异常:网关已安装但未运行(试 aibox cu restart)\n'
+    else
+        endpoint="$(cat "$cu_dir/client/endpoint" 2>/dev/null || true)"
+        if [[ -n "$endpoint" ]] && /usr/bin/nc -z -G 2 "${endpoint%:*}" "${endpoint##*:}" >/dev/null 2>&1; then
+            printf '已启用,网关监听 %s\n' "$endpoint"
+        else
+            printf '已启用,网关在等容器网络就绪(aibox cu doctor 查看)\n'
+        fi
     fi
 }
 
@@ -1425,6 +1477,7 @@ if [[ "${1:-}" == "status" ]]; then
     )"
     echo "  资源配置   : ${status_res}(临时容器每次启动、长期容器首次创建时使用)"
     echo "  剪贴板贴图 : $(aibox_clip_status_line)"
+    echo "  应用控制   : $(aibox_cu_status_line)"
     if [[ "$svc_up" -eq 0 || "$img_ok" -eq 0 ]]; then
         echo "  提示       : 首次安装可运行 aibox setup(安装向导),逐步补齐缺少的部分"
     fi
@@ -1707,6 +1760,12 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
         fi
     done
     unset dev_helper
+    # Mac 应用控制的容器侧转发器,随其他辅助脚本一起同步进长期容器(装到 /usr/local/bin)
+    if [[ -f "$SANDBOX_DIR/computer-use/aibox-mac-mcp" ]] \
+        && ! cp "$SANDBOX_DIR/computer-use/aibox-mac-mcp" "$AIBOX_MACHINE_STAGE/aibox-mac-mcp"; then
+        echo "错误: 无法暂存长期容器辅助脚本 aibox-mac-mcp。" >&2
+        exit 1
+    fi
     AIBOX_DEV_CUSTOM_NAMES=""
     AIBOX_ENV_INDEX=0
     while (( AIBOX_ENV_INDEX < ${#AIBOX_CUSTOM_ENV_NAMES[@]} )); do
@@ -1748,8 +1807,8 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
     unset AIBOX_DEV_CUSTOM_NAMES AIBOX_ENV_INDEX
 
     # 长期容器的系统盘不会随镜像重建而更新。每次启动先把仓库里的辅助脚本同步进去
-    # (登录 profile、shell 包装、代理服务、CLI 管理脚本、virtiofs 缓存释放服务,
-    # 以及 third_party/gost),
+    # (登录 profile、shell 包装、代理服务、CLI 管理脚本、virtiofs 缓存释放服务、
+    # Mac 应用控制的转发器,以及 third_party/gost),
     # 已有的长期容器无需重建即可用上新行为;
     # 再执行同步后的系统配置脚本。脚本从 ~/.aibox/machine 取,程序目录放在哪里都不影响。
     # container machine run(1.0.0 实测)不按 argv 原样传参,而是把参数用空格拼成一行交给机内 bash
@@ -1778,6 +1837,9 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
             install -m 0755 "$stage/dev-configure.sh" /usr/local/sbin/aibox-dev-configure
             install -m 0755 "$stage/dev-proxy-run.sh" /usr/local/sbin/aibox-dev-proxy-run
             install -m 0755 "$stage/dev-tools.sh" /usr/local/sbin/aibox-dev-tools
+            if [ -r "$stage/aibox-mac-mcp" ] && ! cmp -s "$stage/aibox-mac-mcp" /usr/local/bin/aibox-mac-mcp; then
+                install -m 0755 "$stage/aibox-mac-mcp" /usr/local/bin/aibox-mac-mcp
+            fi
             trim_changed=""
             if [ -r "$stage/dev-cache-trim.sh" ] && ! cmp -s "$stage/dev-cache-trim.sh" /usr/local/sbin/aibox-dev-cache-trim; then
                 install -m 0755 "$stage/dev-cache-trim.sh" /usr/local/sbin/aibox-dev-cache-trim
@@ -2000,6 +2062,27 @@ if [[ -f "$SANDBOX_DIR/entrypoint.sh" ]]; then
     MOUNTS+=( -v "$AIBOX_TMP_DIR/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro" )
 fi
 
+# ---- Mac 应用控制(可选,由 aibox cu install 开启)----
+# 容器侧转发器 aibox-mac-mcp 同样以快照方式挂进去(旧镜像里没有它也不需要重建)。
+# 没启用时转发器会以「不可用」的身份应答,所以总是挂上。网关的端点和 token 以环境变量传入,
+# token 与 AIBOX_PROXY 一样只传变量名,值不出现在 container 的 argv 里;代理模式下入口脚本
+# 据端点给防火墙开一个口子。
+AIBOX_CU_ENDPOINT=""
+AIBOX_CU_TOKEN=""
+if [[ -f "$SANDBOX_DIR/computer-use/aibox-mac-mcp" ]]; then
+    aibox_tmp_dir
+    if cp "$SANDBOX_DIR/computer-use/aibox-mac-mcp" "$AIBOX_TMP_DIR/aibox-mac-mcp" \
+        && chmod 0755 "$AIBOX_TMP_DIR/aibox-mac-mcp"; then
+        MOUNTS+=( -v "$AIBOX_TMP_DIR/aibox-mac-mcp:/usr/local/bin/aibox-mac-mcp:ro" )
+    fi
+fi
+if [[ -s "$AIBOX_STATE_DIR/cu/client/token" && -s "$AIBOX_STATE_DIR/cu/client/endpoint" \
+    && ! -f "$AIBOX_STATE_DIR/cu/disabled" ]]; then
+    AIBOX_CU_TOKEN="$(cat "$AIBOX_STATE_DIR/cu/client/token")"
+    AIBOX_CU_ENDPOINT="$(cat "$AIBOX_STATE_DIR/cu/client/endpoint")"
+fi
+export AIBOX_CU_TOKEN
+
 # 容器内工作目录。挂载目录包含整个家目录(在 ~ 下直接运行 aibox cc,或挂 /Users、/)时,
 # 不能把 /workspace/<项目名> 本身当工作目录:Claude Code 启动时会遍历工作目录。virtiofs 为客户机
 # 缓存的每个 inode 在宿主机 VM 进程里各留一个打开的句柄,客户机内存充足时不回收,临时容器的
@@ -2090,6 +2173,9 @@ if [[ -n "$AIBOX_PROXY" ]]; then
 fi
 if [[ -n "$CLIP_BRIDGE_GUEST" ]]; then
     AIBOX_RUN_ARGS+=( -e "CLIP_BRIDGE_DIR=$CLIP_BRIDGE_GUEST" )
+fi
+if [[ -n "$AIBOX_CU_ENDPOINT" ]]; then
+    AIBOX_RUN_ARGS+=( -e AIBOX_CU_TOKEN -e "AIBOX_CU_ENDPOINT=$AIBOX_CU_ENDPOINT" )
 fi
 AIBOX_RUN_ARGS+=(
     -e "AIBOX_PROJECT=$PROJECT_NAME"

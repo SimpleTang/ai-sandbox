@@ -4,6 +4,26 @@
 
 `aibox --version` 显示当前安装的版本。
 
+## [0.4.0] - 2026-10-30
+
+新增 Mac 应用控制（computer use）：容器里的 Claude Code / Codex 可以在后台操作 Mac 上你批准的应用。
+
+English summary: new `aibox cu` command for Mac app control (computer use). It installs the open-source CuaDriver (trycua/cua, pinned version, SHA-256 and Team ID checked, telemetry and update checks off), runs a gateway LaunchAgent on the Mac, and registers an MCP server named `mac` for Claude Code and Codex in both container types. The first time the AI wants an app, the Mac shows an approval dialog (deny / this session / always); terminals, IDEs, browsers, Finder, System Settings, password managers, scripting tools, remote-control and AI apps are always blocked. The gateway filters tools and arguments, CuaDriver runs in bounded mode limited to approved apps, and only `CuaDriver.app` holds Screen Recording and Accessibility. No image rebuild is needed. The setup wizard gains an optional step 9.
+
+### 新增
+
+- `aibox cu install / status / doctor / apps / allow / revoke / off / on / update / restart / uninstall`。安装会下载 aibox 锁定版本的 CuaDriver（约 85 MB），校验 SHA-256 和签名的 Team ID，引导给它授权辅助功能和屏幕录制，启动网关并在 `~/.aibox/claude`、`~/.aibox/codex` 里注册 `mac` 服务。详见 [`computer-use/README.md`](computer-use/README.md)。
+- AI 第一次使用某个应用时，Mac 上弹出确认框（拒绝 / 仅本次会话 / 总是允许）。工具调用本身默认放行，确认框是唯一的人工关口。
+- 终端、IDE 等开发工具、浏览器、访达等系统外壳、系统设置、密码类、脚本与启动器、远程控制、AI 应用一律禁止控制，清单写死在代码里。
+- 网关检查每次调用：只开放 28 个工具，每个工具的参数和 MCP 方法也是白名单；每个操作的目标 pid 必须属于本会话授权的应用（「仅本次会话」的授权别的会话用不了）；`launch_app` 只能用已授权应用的 bundle id，不能带要打开的文件或 URL；不开放前台模式和往宿主机写文件的参数；`run_steps` 逐步检查。只认 `/Applications` 和系统目录里安装的应用，防止伪造应用包骗过确认框。CuaDriver 以 bounded 模式运行，只能碰已授权的应用，不能全屏截图或按桌面坐标操作。审计日志在 `~/Library/Logs/aibox-cu/audit.log`。
+- 支持 MCP 的旧协议和无状态的新协议（2026-07-28）。
+- 不需要重建镜像：临时容器挂上转发器的快照，并以环境变量拿到网关的 token 和端点（token 的值不出现在 `container` 的参数里）；代理模式下入口脚本只为网关的这一个端口给防火墙开口子。长期容器在每次启动时同步转发器。
+- `aibox status` 新增「应用控制」一行；安装向导新增可选的第 9 步；`aibox.conf` 新增 `AIBOX_CU_PORT`（默认 47123），重跑向导时保留原值。
+
+### 升级须知
+
+- 不启用就和以前一样。启用需要命令行工具（CLT）自带的 `/usr/bin/python3`。
+
 ## [0.3.2] - 2026-10-26
 
 本版的修复大多来自 [@rezicwu-sketch](https://github.com/rezicwu-sketch) 在多人共用 Mac mini 的环境中发现并提交的补丁。

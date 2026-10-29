@@ -45,6 +45,11 @@ AIBOX_LANG=""
 AIBOX_MEMORY=""
 AIBOX_CPUS=""
 
+# ---- Mac 应用控制（可选，aibox cu install 启用）----
+# 宿主机网关的监听端口，只绑定在容器网络里宿主机的地址上。空值 = 47123。
+# 修改后运行 aibox cu restart 生效，正在运行的 Claude Code / Codex 需要重启。
+AIBOX_CU_PORT=""
+
 # ---- 自定义容器环境变量（可选）----
 # 每项必须是完整的 NAME=value，名称须匹配 [A-Za-z_][A-Za-z0-9_]*。
 # AIBOX_* 是 ai-box 内部保留名称，不能在此设置。

@@ -148,13 +148,19 @@ COPY enter-shell.sh /usr/local/sbin/aibox-enter-shell
 COPY clipboard-bridge/xclip-shim.sh /usr/local/bin/xclip
 COPY clipboard-bridge/img.sh /usr/local/bin/aibox-img
 
+# ---- Mac 应用控制(aibox cu)的容器侧转发器:MCP stdio <-> 宿主机网关 ----
+# 通过 aibox 启动时,临时容器会挂上宿主机程序目录里的同名快照,长期容器每次启动时同步一份,
+# 所以旧镜像不重建也能用;这里烧一份是为了直接 container run 本镜像时也有。详见 computer-use/README.md。
+COPY computer-use/aibox-mac-mcp /usr/local/bin/aibox-mac-mcp
+
 RUN chmod 0755 \
         /usr/local/bin/entrypoint.sh \
         /usr/local/bin/aibox-user-exec \
         /usr/local/sbin/aibox-network-lockdown \
         /usr/local/sbin/aibox-enter-shell \
         /usr/local/bin/xclip \
-        /usr/local/bin/aibox-img
+        /usr/local/bin/aibox-img \
+        /usr/local/bin/aibox-mac-mcp
 
 # entrypoint 需要 root 初始化网络,执行用户命令前会不可逆地降权到 node。
 USER root

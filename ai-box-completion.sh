@@ -35,7 +35,7 @@ _aibox_complete() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     if [[ "$COMP_CWORD" -eq 1 ]]; then
-        COMPREPLY=( $(compgen -W "setup tmp cc claude codex start restart exec update version set status stop logs delete rm build migrate clip help" -- "$cur") )
+        COMPREPLY=( $(compgen -W "setup tmp cc claude codex start restart exec update version set status stop logs delete rm build migrate clip cu help" -- "$cur") )
         return 0
     fi
     if [[ "${COMP_WORDS[1]:-}" == "tmp" ]]; then
@@ -60,6 +60,7 @@ _aibox_complete() {
         logs)   COMPREPLY=( $(compgen -W "-f --follow --boot -n" -- "$cur") ) ;;
         set)    COMPREPLY=( $(compgen -W "memory=8G cpus=4" -- "$cur") ) ;;
         clip)   COMPREPLY=( $(compgen -W "install uninstall status restart doctor" -- "$cur") ) ;;
+        cu)     COMPREPLY=( $(compgen -W "install status doctor apps allow revoke off on update restart uninstall" -- "$cur") ) ;;
         build)  COMPREPLY=( $(compgen -W "--no-cache" -- "$cur") ) ;;
         setup)  COMPREPLY=( $(compgen -W "--check" -- "$cur") ) ;;
         *)      COMPREPLY=() ;;

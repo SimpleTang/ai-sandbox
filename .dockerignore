@@ -25,3 +25,8 @@
 !clipboard-bridge/
 !clipboard-bridge/xclip-shim.sh
 !clipboard-bridge/img.sh
+
+# Mac app control (aibox cu): only the guest-side MCP relay belongs in the image.
+# The gateway, installer and launchd plist run on macOS and never enter a container.
+!computer-use/
+!computer-use/aibox-mac-mcp

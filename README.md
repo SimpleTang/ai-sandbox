@@ -19,6 +19,7 @@
 - 镜像默认安装 `ai-ipcheck`，可直接使用 `ipcheck` 诊断容器网络环境。
 - 提供临时容器的列表、进入、停止、日志，以及状态自检、CLI 更新和 Tab 补全。
 - `aibox clip install` 启用剪贴板图片桥接，沙箱内的 Claude Code 可用 Ctrl+V 直接粘贴宿主机剪贴板里的图片。
+- `aibox cu install` 启用 Mac 应用控制（computer use）：容器里的 Claude Code / Codex 可以在后台操作 Mac 上你批准的应用；终端、IDE、浏览器、访达、系统设置等一律禁止。
 - 配置、登录状态和可选组件都放在 `~/.aibox/`，程序目录（git 克隆）只读、可整体替换。
 - 镜像不内置 JDK、Maven 等语言工具链，定位是通用的 AI CLI 沙箱；需要时在长期容器里自行安装（系统盘长期保留）。
 
@@ -182,6 +183,7 @@ chmod 600 ~/.aibox/aibox.conf
 | `versions.env` | `aibox tmp update` 确认升级过的 CLI 版本（见「更新」） |
 | `machine/` | 每次启动长期容器前暂存的辅助脚本，由启动器自动维护 |
 | `clipboard/` | `aibox clip install` 复制过来的剪贴板监听脚本 |
+| `cu/` | Mac 应用控制的网关 token、端点和「总是允许」的应用清单（见「Mac 应用控制」） |
 | `.migrated`、`legacy/` | 旧版登录状态迁移的完成标记与备份（见「认证」） |
 
 从把这些文件放在程序目录里的旧版升级时，新版首次运行 `aibox` 的命令或安装向导时会自动搬迁（只读的 `help`、`--version` 和 `setup --check` 除外），新位置已有的文件绝不覆盖：
@@ -340,6 +342,7 @@ Claude 按工作目录的绝对路径区分项目状态：临时容器里是 `/w
 | `~/.aibox/codex` | `/home/node/.codex` | Codex 登录及配置（与长期容器共用） |
 | `<程序目录>/entrypoint.sh` 的启动时快照（位于宿主机临时目录） | `/usr/local/bin/entrypoint.sh` | 只读的运行期入口脚本 |
 | `~/.clipboard-bridge`（仅启用剪贴板桥接时） | `/run/aibox/clipboard-bridge` | 只读的剪贴板图片 |
+| `<程序目录>/computer-use/aibox-mac-mcp` 的启动时快照 | `/usr/local/bin/aibox-mac-mcp` | 只读的 Mac 应用控制转发器 |
 
 除只读的两项外，这些目录用于持久化读写。容器中的 AI 工具及其子进程能够读取或修改它们，项目文件的修改会立即反映到宿主机。不要为不可信代码挂载含敏感内容的项目。
 
@@ -350,6 +353,7 @@ Claude 按工作目录的绝对路径区分项目状态：临时容器里是 `/w
 - `--rm` 只删除临时容器文件系统，不删除项目和登录状态。
 - 项目名取自目录 basename；不同路径下的同名项目会得到相同容器工作路径，并可能共享 Claude 的项目状态。需要严格隔离时请使用不同目录名。
 - 容器降低误触宿主机其他路径的风险，但不能替代代码审查、最小权限、秘密管理或容器运行时安全更新。
+- 启用 Mac 应用控制（`aibox cu install`）后，容器可以经宿主机上的网关操作你批准的 Mac 应用，等于有限地跨出了沙箱。临时容器会拿到网关的 token 和端点（环境变量），代理模式下防火墙只为网关的这一个地址和端口开口子。禁止清单、授权确认和残留风险见 [`computer-use/README.md`](computer-use/README.md)。
 
 长期容器的边界不同：Apple container 会在首次启动时创建与宿主 UID/GID 匹配的用户，授予免密 `sudo`，并把宿主 Home 按原路径整体读写挂载进去。机内 Linux 根文件系统会跨停止和重启保留，但 Home 中的项目、`~/.aibox` 登录状态、Mac 本机 CLI 的 `~/.claude` / `~/.codex`、SSH 配置及其他文件仍是宿主真实数据，机内进程可以读写它们。长期容器会读取同一份 `aibox.conf`；若配置代理，启动器会刷新由 systemd 管理的机内 gost 服务，并让登录会话使用稳定的本地 HTTP 端点；自定义变量通过权限为 `0600` 的临时 env-file 注入。但由于机内用户拥有 sudo 和完整系统控制权，这只是默认代理路由，不是临时容器的 fail-closed 强制出口边界，进程可以主动绕过。长期容器适合可信的日常开发工作流，不适合运行需要限制宿主文件访问或强制代理的不可信代码——这类代码请用 `aibox tmp`。
 
@@ -401,6 +405,13 @@ aibox clip status                     # 自检
 aibox clip restart                    # 重启监听
 aibox clip doctor                     # 贴不上图时诊断
 aibox clip uninstall                  # 卸载
+
+# Mac 应用控制（宿主机上的网关 + CuaDriver，两种容器都生效）
+aibox cu install                      # 启用：装 CuaDriver、引导授权、启动网关、写入 MCP 配置
+aibox cu status                       # 状态；doctor 逐项诊断
+aibox cu apps                         # 「总是允许」的应用；allow <应用> / revoke <应用> 增删
+aibox cu off                          # 急停；on 恢复
+aibox cu update                       # 升级 CuaDriver；restart 重载网关；uninstall 卸载
 ```
 
 `aibox tmp enter`、`stop` 和 `logs` 使用同一套目标解析规则：编号、项目名或完整容器名。编号来自当前的 `aibox tmp list`，容器增减后应重新查看列表。`aibox tmp enter` 只是在已有容器里再开一个 shell，退出它不会停止原容器。`aibox tmp version` 和 `aibox status` 中的版本行是临时容器镜像的构建目标：取 `Dockerfile` 默认值与 `~/.aibox/versions.env` 记录中较新的一个，`aibox tmp version` 会标出来自 `versions.env` 的版本。它不保证与此前构建或正在运行的镜像完全一致；长期容器里实际安装的版本用 `aibox version` 查看。
@@ -437,6 +448,26 @@ aibox clip status      # 应显示「有图可粘」
 
 监听**只镜像图片，不镜像剪贴板文本**，避免密码等敏感文本落盘。原理、架构图与排错见 [`clipboard-bridge/README.md`](clipboard-bridge/README.md)。
 
+## Mac 应用控制
+
+Claude 桌面端和 Codex（ChatGPT 桌面端）都有 computer use：截取屏幕、点击、输入，操作 Mac 上的应用。但它们只在 Mac 本机运行；macOS 只把屏幕录制和辅助功能权限授给 GUI 会话里获得授权的应用，容器里的 CLI 拿不到。
+
+`aibox cu install` 在 Mac 上常驻一个网关（LaunchAgent），并安装开源的 [CuaDriver](https://github.com/trycua/cua)（MIT，aibox 锁定版本，校验 SHA-256 和签名）。容器里的 Claude Code / Codex 会多一个名为 `mac` 的 MCP 服务，经网关在后台操作 Mac 上的应用，不抢你的鼠标和焦点：
+
+```bash
+aibox cu install       # 在 macOS 上执行一次;按提示给 CuaDriver 授权辅助功能和屏幕录制
+aibox cu status        # 应显示「正常」
+# 重启 Claude Code / Codex,然后直接说「用计算器算 123×4」
+```
+
+- **授权**：AI 第一次用某个应用时，Mac 上会弹出确认框，可选「拒绝 / 仅本次会话 / 总是允许」。工具调用本身不再逐次询问，确认框是唯一的人工关口。`aibox cu allow` / `revoke` 可以直接增删「总是允许」的应用。
+- **禁止控制**：终端、IDE 等开发工具、浏览器、访达等系统外壳、系统设置、密码类、脚本与启动器、远程控制、AI 应用。清单写死在代码里，配置改不了。
+- **三层防护**：网关检查每次调用（工具、参数和 MCP 方法都是白名单；每个操作的目标 pid 必须属于本会话授权的应用；不开放前台模式和往宿主机写文件的参数），CuaDriver 以 bounded 模式只允许碰已授权的应用，屏幕录制和辅助功能权限只授给 `CuaDriver.app`。只认 `/Applications` 和系统目录里安装的应用。
+- **不需要重建镜像**：容器侧的转发器在启动容器时放进去。临时容器以环境变量拿到网关的 token 和端点；代理模式下防火墙只放行网关的这一个端口。
+- **急停**：`aibox cu off`。审计日志在 `~/Library/Logs/aibox-cu/audit.log`。
+
+需要命令行工具（CLT）自带的 `/usr/bin/python3`。架构、安全模型、禁止清单、残留风险和排障见 [`computer-use/README.md`](computer-use/README.md)。
+
 ## 开发工具链
 
 镜像只内置 Claude Code、Codex 及其运行所需的 Node.js、Python、git 等基础工具，不内置 JDK、Maven、Gradle 等语言工具链。需要时：
@@ -460,6 +491,7 @@ java -Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=8080 \
 brew upgrade aibox                 # Homebrew 安装
 git -C /path/to/ai-sandbox pull    # git 克隆
 aibox clip restart                 # 启用过剪贴板贴图时，刷新监听脚本
+aibox cu restart                   # 启用过 Mac 应用控制时，换上新版网关
 ```
 
 用户数据在 `~/.aibox`，升级不会动它。各版本的变化与升级须知见 [CHANGELOG.md](CHANGELOG.md)。
@@ -551,6 +583,7 @@ aibox tmp stop --all
 aibox tmp clear
 aibox delete
 aibox clip uninstall                  # 启用过剪贴板贴图时
+aibox cu uninstall                    # 启用过 Mac 应用控制时（会询问是否删除 CuaDriver.app）
 container image delete ai-sandbox:latest
 container image delete ai-sandbox-dev:latest
 rm "$HOME/.local/bin/aibox"
@@ -560,4 +593,4 @@ rm "$HOME/.local/bin/aibox"
 
 ## 许可证与第三方软件
 
-本项目代码按 [MIT License](LICENSE) 发布。可选的 gost，以及基础镜像、系统包、Claude Code、Codex CLI 和 `ai-ipcheck`，均由各自作者按各自许可证或服务条款提供，不因本仓库的 MIT License 而改变。下载、使用或重新分发前，请查阅上游许可、NOTICE 和条款。
+本项目代码按 [MIT License](LICENSE) 发布。可选的 gost、Mac 应用控制用到的 [CuaDriver](https://github.com/trycua/cua)（启用时从 GitHub 下载），以及基础镜像、系统包、Claude Code、Codex CLI 和 `ai-ipcheck`，均由各自作者按各自许可证或服务条款提供，不因本仓库的 MIT License 而改变。下载、使用或重新分发前，请查阅上游许可、NOTICE 和条款。
