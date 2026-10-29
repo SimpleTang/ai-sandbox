@@ -34,12 +34,20 @@ def owner(pid):
     return PIDS.get(pid)
 
 
+# element_token -> 网关读到过的行的角色
+ROWS = {"s1:2": "AXButton", "s1:3": "AXTextField", "s1:9": "AXMenuItem", "s1:10": "AXMenuBarItem"}
+
+
+def rows(token):
+    return ROWS.get(token)
+
+
 class PolicyTest(unittest.TestCase):
     def allowed(self, name, args):
-        self.assertIsNone(gw.check_call(name, args, GRANTED, owner), "%s %r 应该放行" % (name, args))
+        self.assertIsNone(gw.check_call(name, args, GRANTED, owner, rows), "%s %r 应该放行" % (name, args))
 
     def denied(self, name, args, words):
-        err = gw.check_call(name, args, GRANTED, owner)
+        err = gw.check_call(name, args, GRANTED, owner, rows)
         self.assertIsNotNone(err, "%s %r 应该拒绝" % (name, args))
         self.assertIn(words, err)
 
@@ -155,6 +163,104 @@ class PolicyTest(unittest.TestCase):
             for arg in gw.TOOL_ARGS[name]:
                 self.assertEqual(gw._file_args({arg: 1}), [], "%s.%s 被误判成写文件参数" % (name, arg))
         self.assertNotIn("run_steps", gw.STEP_TOOLS)
+
+
+class MenuAndKeysTest(unittest.TestCase):
+    def check(self, name, args):
+        return gw.check_call(name, args, GRANTED, owner, rows)
+
+    def test_menu_paths(self):
+        self.assertIsNone(self.check("invoke_menu", {"pid": 11, "window_id": 1, "path": ["控制", "播放"]}))
+        for path in (["Apple", "关机"], [" apple ", "重新启动"], ["网易云音乐", "服务", "x"],
+                     ["App", "Services", "New Terminal at Folder"], [""], []):
+            self.assertIsNotNone(self.check("invoke_menu", {"pid": 11, "window_id": 1, "path": path}), path)
+
+    def test_tokens(self):
+        self.assertIsNone(self.check("click", {"pid": 11, "element_token": "s1:2"}))
+        self.assertIn("菜单", self.check("click", {"pid": 11, "element_token": "s1:9"}))
+        self.assertIn("菜单", self.check("click", {"pid": 11, "element_token": "s1:10"}))
+        self.assertIn("读到过", self.check("click", {"pid": 11, "element_token": "s1:61"}))
+        self.assertIn("读到过", self.check("type_text", {"pid": 11, "text": "x", "element_token": "s9:3"}))
+        err = gw.check_call("run_steps", {"pid": 11, "steps": [{"click": {"element_token": "s1:9"}}]},
+                            GRANTED, owner, rows)
+        self.assertIn("菜单", err)
+
+    def test_name_selectors(self):
+        run = lambda a: gw.check_call("run_steps", {"pid": 11, "steps": [{"click": a}]}, GRANTED, owner, rows)
+        self.assertIsNone(run({"role": "button", "name": "7"}))
+        self.assertIn("role", run({"name": "关机"}))
+        self.assertIn("菜单", run({"role": "menuitem", "name": "关机"}))
+        self.assertIn("菜单", run({"role": "AXMenuItem", "name": "关机"}))
+        self.assertIn("菜单", run({"role": "menu item", "name": "关机"}))
+
+    def test_hotkeys(self):
+        ok = (["cmd", "a"], ["cmd", "c"], ["cmd", "z"], ["cmd", "shift", "z"], ["cmd", "s"], ["option", "left"],
+              ["shift", "tab"], ["cmd", "return"], ["command", "shift", "n"])
+        bad = (["cmd", "shift", "q"], ["ctrl", "cmd", "q"], ["cmd", "option", "esc"], ["cmd", "space"],
+               ["cmd", "v"], ["cmd", "shift", "4"], ["fn", "e"], ["cmd", "shift", "a"], ["cmd", "shift", "m"],
+               ["Command", "Shift", "Q"], ["ctrl", "option", "cmd", "eject"], ["cmd", "tab"], ["hyper", "x"])
+        for keys in ok:
+            self.assertIsNone(self.check("hotkey", {"pid": 11, "keys": keys}), keys)
+        for keys in bad:
+            self.assertIsNotNone(self.check("hotkey", {"pid": 11, "keys": keys}), keys)
+        self.assertIsNotNone(self.check("press_key", {"pid": 11, "key": "q", "modifiers": ["cmd", "shift"]}))
+        self.assertIsNone(self.check("press_key", {"pid": 11, "key": "return"}))
+
+    def test_coordinates_and_scope(self):
+        self.assertIsNone(self.check("click", {"pid": 11, "x": 0, "y": 10}))
+        self.assertIn("坐标", self.check("click", {"pid": 11, "x": -5, "y": 10}))
+        self.assertIn("坐标", self.check("drag", {"pid": 11, "from_x": 1, "from_y": 1, "to_x": 3, "to_y": -1}))
+        self.assertIn("scope", self.check("click", {"pid": 11, "x": 1, "y": 1, "scope": "desktop"}))
+
+
+class TreeSanitizeTest(unittest.TestCase):
+    TREE = "\n".join([
+        "window_id=1 pid=11 snapshot_id=s00000003",
+        "- [0] AXWindow \"计算器\" [actions=[raise]]",
+        "  - [5] AXButton \"7\" [actions=[press]]",
+        "- [1] AXMenuBar [actions=[cancel]]",
+        "  - [2] AXMenuBarItem \"Apple\" [actions=[cancel,press,pick]]",
+        "    - [3] AXMenu [actions=[cancel]]",
+        "      - [4] AXMenuItem \"关于本机\" [actions=[press]]",
+        "        - AXMenuItem \"简历.pdf\"",
+        "      - [6] AXMenuItem \"关机\" [actions=[press]]",
+        "  - [7] AXMenuBarItem \"计算器\" [actions=[press]]",
+        "    - [8] AXMenu [actions=[cancel]]",
+        "      - [9] AXMenuItem \"服务\" [actions=[press]]",
+        "        - [10] AXMenu [actions=[cancel]]",
+        "          - [11] AXMenuItem \"New Terminal at Folder\" [actions=[press]]",
+        "      - [12] AXMenuItem \"退出计算器\" [actions=[press]]",
+    ])
+
+    def test_markdown(self):
+        res = {"content": [{"type": "text", "text": self.TREE}],
+               "structuredContent": {"snapshot_id": "s00000003", "tree_markdown": self.TREE}}
+        snap, roles = gw.sanitize_tree_result(res)
+        self.assertEqual(snap, "s00000003")
+        for text in (res["content"][0]["text"], res["structuredContent"]["tree_markdown"]):
+            for gone in ("Apple", "关于本机", "简历.pdf", "关机", "服务", "New Terminal"):
+                self.assertNotIn(gone, text)
+            for kept in ("计算器", "\"7\"", "退出计算器"):
+                self.assertIn(kept, text)
+        self.assertEqual(roles.get(5), "AXButton")
+        self.assertEqual(roles.get(12), "AXMenuItem")
+        for gone in (2, 3, 4, 6, 9, 10, 11):
+            self.assertNotIn(gone, roles)
+
+    def test_elements(self):
+        els = [{"element_index": 0, "role": "AXWindow", "label": "计算器"},
+               {"element_index": 1, "role": "AXMenuBar", "parent_index": None},
+               {"element_index": 2, "role": "AXMenuBarItem", "label": "Apple", "parent_index": 1},
+               {"element_index": 3, "role": "AXMenu", "parent_index": 2},
+               {"element_index": 4, "role": "AXMenuItem", "label": "关机", "parent_index": 3},
+               {"element_index": 5, "role": "AXButton", "label": "7", "parent_index": 0},
+               {"element_index": 9, "role": "AXMenuItem", "label": "Services", "parent_index": 1},
+               {"element_index": 11, "role": "AXMenuItem", "label": "x", "parent_index": 9}]
+        res = {"structuredContent": {"snapshot_id": "s00000004", "elements": els}}
+        snap, roles = gw.sanitize_tree_result(res)
+        kept = [e["element_index"] for e in res["structuredContent"]["elements"]]
+        self.assertEqual(kept, [0, 1, 5])
+        self.assertEqual(set(roles), {0, 1, 5})
 
 
 class MethodTest(unittest.TestCase):

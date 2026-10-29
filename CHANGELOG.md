@@ -4,6 +4,26 @@
 
 `aibox --version` 显示当前安装的版本。
 
+## [0.4.1] - 2026-10-30
+
+安全修复：Mac 应用控制能经已授权应用的菜单栏碰到苹果菜单和「服务」菜单。启用了 `aibox cu` 的用户请升级。
+
+English summary: security fix for Mac app control. The Apple menu and the Services menu live in every app's menu bar, so any approved app exposed them: shutdown, restart, log out, force quit, Recent Items (including terminal apps and recent document names) and Services. The gateway now rejects `invoke_menu` paths into those menus, strips them from every UI tree it returns, only accepts element tokens for rows it has seen that are not menu items, requires a role for name-based targets in `run_steps`, and blocks system-level shortcuts (which the driver turns into menu actions in the background), ⌘V, most ⇧⌘ combos, negative coordinates and desktop scope.
+
+### 修复
+
+- 苹果菜单(关机、重新启动、退出登录、强制退出、最近使用的项目、系统设置)和「服务」菜单挂在每个应用的菜单栏里,授权任何一个应用都能经 `invoke_menu`、菜单项的 `element_token`、`run_steps` 按名字定位或快捷键触发它们;读界面树时还会把最近文档的文件名交给 agent。现在网关:
+  - 拒绝以苹果菜单开头或经过「服务」的 `invoke_menu` 路径;
+  - 从返回的界面树(文本、`tree_markdown`、`elements`)里整段删掉这两块;
+  - 只接受网关读到过、且不是菜单类的 `element_token`;
+  - `run_steps` 按名字定位时必须写 `role`,且不能是菜单类角色;
+  - 拦掉系统级快捷键(fn、⌃⌘ / ⌃⌥、⇧⌘Q、⌥⌘⎋、⌘空格、⌘Tab、截屏)、⌘V 和大多数 ⇧⌘ 组合(驱动在后台会把菜单快捷键改成执行对应的菜单项);
+  - 拒绝负的像素坐标和 `scope: "desktop"`。
+
+### 升级须知
+
+- 升级后运行 `aibox cu restart` 换上新版网关,然后重启正在运行的 Claude Code / Codex。
+
 ## [0.4.0] - 2026-10-30
 
 新增 Mac 应用控制（computer use）：容器里的 Claude Code / Codex 可以在后台操作 Mac 上你批准的应用。

@@ -297,7 +297,113 @@ def _check_target(name, args, granted, owner, default_pid=None):
     return None
 
 
-def _check_one(name, args, granted, owner, default_pid=None, extra_args=()):
+# ---- 全局菜单与快捷键 ----
+# 苹果菜单(关机、重新启动、退出登录、强制退出、最近使用的项目、系统设置……)和「服务」菜单挂在
+# 每个应用的菜单栏里,授权任何一个应用都能碰到它们。菜单只能经 invoke_menu(检查路径)使用;
+# 元素标识只能用网关见过、且不是菜单项的行;读回的界面树里这两块整段删掉。
+APPLE_MENU_LABELS = frozenset({"apple", "苹果"})
+SERVICES_LABELS = frozenset({"服务", "服務", "services"})
+MENU_ROLES = frozenset({"axmenubar", "axmenubaritem", "axmenu", "axmenuitem", "axmenubutton"})
+
+
+def menu_path_error(path):
+    if not isinstance(path, list) or not path:
+        return "invoke_menu 需要非空的 path 数组"
+    labels = [str(x).strip().lower() for x in path]
+    if labels[0] in APPLE_MENU_LABELS or not labels[0]:
+        return "aibox 禁止使用苹果菜单(关机、退出登录、强制退出、最近使用的项目等)"
+    if any(l in SERVICES_LABELS for l in labels):
+        return "aibox 禁止使用「服务」菜单(服务能运行脚本、打开别的应用)"
+    return None
+
+
+MOD_ALIASES = {"cmd": "cmd", "command": "cmd", "⌘": "cmd", "shift": "shift", "⇧": "shift",
+               "option": "option", "opt": "option", "alt": "option", "⌥": "option",
+               "ctrl": "ctrl", "control": "ctrl", "⌃": "ctrl", "fn": "fn", "globe": "fn"}
+KEY_ALIASES = {"esc": "escape", "spacebar": "space", "enter": "return", "backspace": "delete"}
+# 系统级或会泄露信息的组合:退出登录、强制退出、聚焦、切换应用、截屏(会往桌面写文件)、
+# 粘贴(会把用户剪贴板里的内容放进应用,agent 再截图就读到了)
+BLOCKED_COMBOS = frozenset(frozenset(c) for c in (
+    ("cmd", "shift", "q"), ("cmd", "option", "shift", "q"), ("cmd", "option", "escape"),
+    ("cmd", "option", "shift", "escape"), ("cmd", "space"), ("ctrl", "space"), ("cmd", "tab"),
+    ("cmd", "shift", "tab"), ("cmd", "shift", "3"), ("cmd", "shift", "4"), ("cmd", "shift", "5"),
+    ("cmd", "shift", "6"), ("cmd", "option", "d"), ("cmd", "v"), ("cmd", "shift", "v"),
+    ("cmd", "option", "v"), ("cmd", "option", "shift", "v"), ("cmd", "option", "m"),
+))
+# 「服务」菜单的快捷键大多是 ⇧⌘ 组合;⇧⌘ 只放行这些常用的
+CMD_SHIFT_KEYS = frozenset({"z", "n", "t", "g", "[", "]", "left", "right", "up", "down", "home", "end",
+                            "return", "tab", "delete", "=", "-", "pageup", "pagedown"})
+
+
+def combo_error(mods, key):
+    """mods: 修饰键名列表;key: 主键。允许返回 None,否则返回原因。"""
+    norm = set()
+    for m in mods or []:
+        n = MOD_ALIASES.get(str(m).strip().lower())
+        if n is None:
+            return "不认识的修饰键 %s" % m
+        norm.add(n)
+    key = str(key or "").strip().lower()
+    key = KEY_ALIASES.get(key, key)
+    if "fn" in norm:
+        return "aibox 不开放 fn 组合键"
+    if "ctrl" in norm and ("cmd" in norm or "option" in norm):
+        return "aibox 不开放 ⌃⌘ / ⌃⌥ 组合键(锁屏、系统快捷键)"
+    if frozenset(norm | {key}) in BLOCKED_COMBOS:
+        return "aibox 不开放这个快捷键(系统级操作或会读取剪贴板)"
+    if {"cmd", "shift"} <= norm and key not in CMD_SHIFT_KEYS:
+        return "aibox 不开放这个 ⇧⌘ 组合键(可能是「服务」菜单的快捷键)"
+    return None
+
+
+def _role_norm(role):
+    return re.sub(r"[^a-z]", "", str(role).lower())
+
+
+def _check_input(name, args, rows):
+    """元素标识、按名字定位、快捷键、像素坐标。rows(token) 返回网关见过的这一行的角色,没见过返回 None。"""
+    tok = args.get("element_token")
+    if tok is not None:
+        role = rows(tok) if (rows and isinstance(tok, str)) else None
+        if role is None:
+            return "element_token %s 不是网关读到过的元素(先 get_window_state,并且不要用 query 过滤掉它)" % str(tok)[:40]
+        if _role_norm(role) in MENU_ROLES:
+            return "不能用 element_token 操作菜单,菜单请用 invoke_menu"
+    if "name" in args or "role" in args:
+        role = args.get("role")
+        if not isinstance(role, str) or not role.strip():
+            return "%s 按名字定位元素时必须同时写 role" % name
+        norm = _role_norm(role)
+        if "menu" in norm:
+            return "不能按名字定位菜单,菜单请用 invoke_menu"
+    if name == "hotkey":
+        keys = args.get("keys")
+        if not isinstance(keys, list) or len(keys) < 2:
+            return "hotkey 的 keys 必须是修饰键加一个主键"
+        err = combo_error(keys[:-1], keys[-1])
+        if err:
+            return err
+    if name == "press_key" and args.get("modifiers"):
+        mods = args.get("modifiers")
+        if not isinstance(mods, list):
+            return "press_key 的 modifiers 必须是数组"
+        err = combo_error(mods, args.get("key"))
+        if err:
+            return err
+    if name == "invoke_menu":
+        err = menu_path_error(args.get("path"))
+        if err:
+            return err
+    for key in ("x", "y", "from_x", "from_y", "to_x", "to_y"):
+        v = args.get(key)
+        if v is not None and (not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0):
+            return "%s 的 %s 必须是不小于 0 的窗口内像素坐标" % (name, key)
+    if args.get("scope") not in (None, "window"):
+        return "%s 只能作用于窗口(scope=window)" % name
+    return None
+
+
+def _check_one(name, args, granted, owner, default_pid=None, extra_args=(), rows=None):
     allowed = TOOL_ARGS.get(name)
     if allowed is None:
         why = DISABLED_REASONS.get(name)
@@ -321,16 +427,19 @@ def _check_one(name, args, granted, owner, default_pid=None, extra_args=()):
         return None
     if name in TARGETLESS_TOOLS:
         return None
+    err = _check_input(name, args, rows)
+    if err:
+        return err
     return _check_target(name, args, granted, owner, default_pid)
 
 
-def check_call(name, args, granted, owner=None):
-    """检查一次 tools/call。granted 是本会话可用的 bundle id 集合,owner(pid) 返回该进程的 bundle id。
-    通过返回 None,否则返回给 agent 看的拒绝原因。"""
+def check_call(name, args, granted, owner=None, rows=None):
+    """检查一次 tools/call。granted 是本会话可用的 bundle id 集合,owner(pid) 返回该进程的 bundle id,
+    rows(element_token) 返回网关读到过的这一行的角色。通过返回 None,否则返回给 agent 看的拒绝原因。"""
     if not isinstance(name, str):
         return "工具名必须是字符串"
     if name != "run_steps":
-        return _check_one(name, args, granted, owner)
+        return _check_one(name, args, granted, owner, rows=rows)
     err = _check_one("run_steps", args, granted, owner) if not isinstance(args, dict) else None
     if err:
         return err
@@ -362,7 +471,7 @@ def check_call(name, args, granted, owner=None):
             continue
         if tool not in STEP_TOOLS:
             return "run_steps 第 %d 步的工具 %s 不允许" % (i, tool)
-        err = _check_one(tool, step_args, granted, owner, default_pid, STEP_SELECTOR_ARGS)
+        err = _check_one(tool, step_args, granted, owner, default_pid, STEP_SELECTOR_ARGS, rows)
         if err:
             return "run_steps 第 %d 步:%s" % (i, err)
         last_pid = step_args.get("pid", last_pid)
@@ -370,10 +479,91 @@ def check_call(name, args, granted, owner=None):
     if observe is not None:
         if not isinstance(observe, dict):
             return "run_steps 的 observe 必须是对象"
-        err = _check_one("get_window_state", observe, granted, owner, last_pid)
+        err = _check_one("get_window_state", observe, granted, owner, last_pid, rows=rows)
         if err:
             return "run_steps 的 observe:%s" % err
     return None
+
+
+# ---------------------------------------------------------------------------
+# 读回的界面树:删掉苹果菜单和「服务」菜单,记下每行的角色
+# ---------------------------------------------------------------------------
+
+TREE_LINE_RE = re.compile(r'^(?P<ind>\s*)(?:[+~]\s+)?-\s+(?:\[(?P<idx>\d+)\]\s+)?(?P<role>AX\w+)(?:\s+"(?P<label>[^"]*)")?')
+
+
+def _hidden_menu(role, label):
+    r = _role_norm(role)
+    lab = (label or "").strip().lower()
+    return (r == "axmenubaritem" and lab in APPLE_MENU_LABELS) or (r == "axmenuitem" and lab in SERVICES_LABELS)
+
+
+def filter_tree_text(text):
+    """删掉 markdown 树里苹果菜单和「服务」菜单这两整块;返回 (新文本, {行号: 角色})。"""
+    out, roles, skip_indent = [], {}, None
+    for line in text.split("\n"):
+        m = TREE_LINE_RE.match(line)
+        if m:
+            indent = len(m.group("ind"))
+            if skip_indent is not None and indent > skip_indent:
+                continue
+            skip_indent = None
+            if _hidden_menu(m.group("role"), m.group("label")):
+                skip_indent = indent
+                continue
+            if m.group("idx") is not None:
+                roles[int(m.group("idx"))] = m.group("role")
+        elif skip_indent is not None and line.strip() and len(line) - len(line.lstrip()) > skip_indent:
+            continue
+        out.append(line)
+    return "\n".join(out), roles
+
+
+def sanitize_tree_result(result):
+    """净化一次工具回复里的界面树(文本块、tree_markdown、elements)。返回 (snapshot_id, {行号: 角色})。"""
+    roles = {}
+    sc = result.get("structuredContent") if isinstance(result.get("structuredContent"), dict) else {}
+    for c in result.get("content") or []:
+        if isinstance(c, dict) and c.get("type") == "text" and isinstance(c.get("text"), str):
+            c["text"], r = filter_tree_text(c["text"])
+            roles.update(r)
+    if isinstance(sc.get("tree_markdown"), str):
+        sc["tree_markdown"], r = filter_tree_text(sc["tree_markdown"])
+        roles.update(r)
+    els = sc.get("elements")
+    if isinstance(els, list):
+        by_index = {e.get("element_index"): e for e in els if isinstance(e, dict)}
+        hidden = set()
+
+        def is_hidden(e, depth=0):
+            idx = e.get("element_index")
+            if idx in hidden:
+                return True
+            if depth > 64:
+                return False
+            if _hidden_menu(e.get("role"), e.get("label")):
+                hidden.add(idx)
+                return True
+            parent = by_index.get(e.get("parent_index"))
+            if parent is not None and parent is not e and is_hidden(parent, depth + 1):
+                hidden.add(idx)
+                return True
+            return False
+
+        kept = []
+        for e in els:
+            if not isinstance(e, dict) or is_hidden(e):
+                continue
+            kept.append(e)
+            if isinstance(e.get("element_index"), int) and e.get("role"):
+                roles[e["element_index"]] = e["role"]
+        sc["elements"] = kept
+    snap = sc.get("snapshot_id")
+    if not snap:
+        texts = " ".join(c.get("text", "") for c in result.get("content") or [] if isinstance(c, dict))
+        m = re.search(r"snapshot_id=(\S+)", texts)
+        snap = m.group(1) if m else None
+    return snap, roles
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +832,8 @@ AIBOX_NOTE = """[aibox] 这些工具操作的是宿主 Mac 上真实的应用,�
 - 每个动作都要落在本会话已授权应用的窗口上:带 pid(用 element_token 时网关会按快照自动补上);
   不支持桌面坐标(target kind=desktop)和前台模式(delivery_mode=foreground)。
 - 只认 /Applications 和系统目录里安装的应用,不接受路径。
+- 菜单只能用 invoke_menu(苹果菜单和「服务」菜单禁止);element_token 只能用读到过的非菜单元素;
+  run_steps 按名字定位元素时必须同时写 role;系统级快捷键、⌘V 和大多数 ⇧⌘ 组合不开放。
 - 不可用:list_apps、run_script、全屏截图、剪贴板、往宿主机写文件的参数(screenshot_out_file 等)。
 - 不要点击邮件、消息、文档里的链接;不要替用户转账、下单或做任何涉及钱的操作。
 
@@ -1056,6 +1248,9 @@ class Session:
         # 记下每个快照属于哪个 pid,调用时替 agent 补上。快照 id 只在同一个驱动子进程内有效。
         self.snapshots = {}
         self.snapshot_watch = {}
+        # 网关读到过的界面行:snapshot_id -> {行号: 角色};(pid, window_id) -> 最近一次的行
+        self.rows = {}
+        self.window_rows = {}
         self.stateless = False
 
     # ---- 发给容器 ----
@@ -1087,6 +1282,8 @@ class Session:
 
     def _spawn(self):
         self.snapshots = {}
+        self.rows = {}
+        self.window_rows = {}
         gen = self.gw.ensure_driver()
         proc = subprocess.Popen([self.gw.driver.exe, "mcp", "--socket", self.gw.driver.sock],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -1177,17 +1374,27 @@ class Session:
                 res["tools"] = [t for t in res.get("tools") or [] if t.get("name") in DRIVER_TOOLS]
                 if method == "tools/list":
                     res["tools"] += VIRTUAL_TOOLS
-            pid = self.snapshot_watch.pop(json.dumps(mid), None)
-            if pid is not None and isinstance(msg.get("result"), dict):
-                snap = (msg["result"].get("structuredContent") or {}).get("snapshot_id")
-                if not snap:
-                    texts = " ".join(c.get("text", "") for c in msg["result"].get("content") or []
-                                     if isinstance(c, dict))
-                    m = re.search(r"snapshot_id=(\S+)", texts)
-                    snap = m.group(1) if m else None
-                if snap:
-                    self.snapshots[snap] = pid
+            watch = self.snapshot_watch.pop(json.dumps(mid), None)
+            if method == "tools/call" and isinstance(msg.get("result"), dict):
+                # 所有工具回复都先净化:删掉苹果菜单和「服务」菜单,记下每行的角色
+                snap, roles = sanitize_tree_result(msg["result"])
+                if watch and snap and watch.get("tree"):
+                    key = (watch.get("pid"), watch.get("window_id"))
+                    # 差异读取只给出变化的行,其余行沿用上一次读到的角色
+                    merged = dict(self.window_rows.get(key, {})) if watch.get("since") else {}
+                    merged.update(roles)
+                    self.window_rows[key] = merged
+                    self.rows[snap] = merged
+                if watch and snap and _is_pid(watch.get("pid")):
+                    self.snapshots[snap] = watch["pid"]
         self.send(msg)
+
+    def token_role(self, token):
+        snap, _, n = str(token).partition(":")
+        try:
+            return self.rows.get(snap, {}).get(int(n))
+        except ValueError:
+            return None
 
     def forward(self, msg):
         is_req = "id" in msg and "method" in msg
@@ -1237,15 +1444,26 @@ class Session:
                 step_args = _step_parts(step)[1]
                 if isinstance(step_args, dict):
                     self.fill_pid(step_args)
-        err = check_call(name, args, self.gw.session_granted(self), self.gw.owner)
+        err = check_call(name, args, self.gw.session_granted(self), self.gw.owner, self.token_role)
         target = describe_target(name, args)
         if err:
             self.gw.audit.write(self.who, str(name), target, "拒绝", err)
             self.reply(mid, tool_result(err, is_error=True))
             return
         self.gw.audit.write(self.who, name, target, "放行")
-        if name == "get_window_state" and _is_pid(args.get("pid")):
-            self.snapshot_watch[json.dumps(mid)] = args["pid"]
+        if name == "get_window_state":
+            self.snapshot_watch[json.dumps(mid)] = {
+                "pid": args.get("pid"), "window_id": args.get("window_id"), "since": bool(args.get("since")),
+                "tree": args.get("include_accessibility_tree", True) is not False}
+        elif name == "run_steps" and isinstance(args.get("observe"), dict):
+            obs = args["observe"]
+            steps = [_step_parts(st)[1] or {} for st in args.get("steps") or []]
+            pid = obs.get("pid") or next((a.get("pid") for a in reversed(steps) if a.get("pid")), args.get("pid"))
+            win = obs.get("window_id") or next((a.get("window_id") for a in reversed(steps) if a.get("window_id")),
+                                               args.get("window_id"))
+            self.snapshot_watch[json.dumps(mid)] = {
+                "pid": pid, "window_id": win, "since": obs.get("since", "latest") is not None,
+                "tree": obs.get("include_accessibility_tree", True) is not False}
         self.forward(msg)
 
     def request_access(self, args):
