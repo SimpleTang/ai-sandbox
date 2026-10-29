@@ -17,6 +17,7 @@ aibox cu status        # 应显示「正常」
 2. 引导你给 CuaDriver 授权：辅助功能、屏幕录制（macOS 26 还会多问一次「直接访问屏幕」）。系统提示「退出并重新打开」时点它。
 3. 生成网关的 token，装上网关的 LaunchAgent `com.aibox.cu-gateway`。
 4. 在 `~/.aibox/claude`（`.claude.json` 与 `settings.json`）和 `~/.aibox/codex/config.toml` 里注册 `mac` 服务，并放行它的工具调用。
+5. 把配套的 skill `aibox-mac` 装进 `~/.aibox/claude/skills/` 和 `~/.aibox/codex/skills/`（见下文「配套的 skill」）。
 
 装好后重启正在运行的 Claude Code / Codex。之后直接用自然语言让它操作某个应用即可，例如「用计算器算 123×4」「在备忘录里新建一条笔记」。AI 第一次用某个应用时，Mac 上会弹出确认框：
 
@@ -27,6 +28,23 @@ aibox cu status        # 应显示「正常」
 旧镜像不需要重建：容器侧的转发器 `aibox-mac-mcp` 会在启动容器时放进去（临时容器挂一份快照，长期容器在每次启动时同步）。
 
 需要命令行工具（CLT）自带的 `/usr/bin/python3`（3.9 以上），网关用它运行；没有时 `xcode-select --install`。
+
+## 配套的 skill
+
+参照 Codex 的 Computer Use 插件（一个 MCP 服务加一个 skill）：MCP 管「能做什么」，skill 管「怎么做好」。`aibox-mac` 在 `computer-use/skills/aibox-mac/`：
+
+| 文件 | 内容 |
+|---|---|
+| `SKILL.md` | 什么时候用；标准流程（申请授权 → 启动 → 读窗口 → `run_steps` → 核对）；标准应用与自绘界面两类应用的操作方法；输入文字的坑（`\n` 等于回车会直接发送）；做了收不回的操作前怎么核对、什么时候先问用户；aibox 下哪些工具和参数用不了 |
+| `references/apps.md` | 真机验证过的应用经验：微信、网易云音乐、计算器 |
+| `references/troubleshooting.md` | 网关的每种拒绝信息、驱动的每种报错该怎么办 |
+| `references/local-notes.md` | 本机积累的经验。agent 发现新的应用特性时按格式追加，并告诉用户；升级 aibox 不覆盖，卸载时有内容也保留 |
+
+- 网关注入给 agent 的服务说明只留几条要点，并指向这个 skill。cua-driver 自带的说明大多讲 aibox 下不可用的功能，已整段替换。
+- `aibox cu install` 和 `aibox cu restart` 会安装或刷新它。用户自己有同名 skill（没有 `.aibox-managed` 标记文件）时不动。
+- Claude Code 默认不能读工作目录以外的文件，所以注册时会在 `settings.json` 里放行读取 skill 目录、编辑 `local-notes.md`（长期容器和临时容器的路径各一条）。
+- Codex 默认只能写工作目录，可能写不进 `local-notes.md`；这时 skill 会让它把经验直接告诉你。
+- 新的应用经验欢迎整理进 `references/apps.md`，随 aibox 发布。
 
 ## 工作原理
 

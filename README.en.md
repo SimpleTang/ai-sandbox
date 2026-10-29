@@ -732,6 +732,10 @@ aibox cu status        # should report the gateway as healthy
   containers receive the gateway token and endpoint as environment variables; in proxy mode the
   firewall opens only the gateway port.
 - **Emergency stop**: `aibox cu off`. The audit log is `~/Library/Logs/aibox-cu/audit.log`.
+- **Companion skill**: a skill named `aibox-mac` is installed alongside (modeled on Codex), teaching the
+  standard flow, how to drive apps with or without an accessibility tree, and how to verify before
+  irreversible actions, with field-tested notes for apps such as WeChat and NetEase Cloud Music; new
+  findings go into a local `local-notes.md`.
 
 It needs `/usr/bin/python3` from the Command Line Tools. See
 [`computer-use/README.md`](computer-use/README.md) (Chinese) for the architecture, security model,

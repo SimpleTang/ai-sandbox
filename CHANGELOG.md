@@ -4,6 +4,27 @@
 
 `aibox --version` 显示当前安装的版本。
 
+## [0.4.2] - 2026-10-30
+
+Mac 应用控制新增配套的 skill `aibox-mac`,参照 Codex 的 Computer Use 插件(MCP 服务 + skill)。
+
+English summary: `aibox cu` now installs a companion skill, `aibox-mac`, into both Claude Code and Codex, modeled on Codex's Computer Use plugin (an MCP server plus a skill). It covers when to use computer use, the standard flow, how to drive apps with and without an accessibility tree, input pitfalls (a newline sends a chat message), when to verify or ask before irreversible actions, and what aibox blocks; references hold field-tested notes for WeChat, NetEase Cloud Music and Calculator, a troubleshooting table, and a local notes file the agent appends to, which survives upgrades. The gateway's injected instructions shrink to a few rules pointing at the skill, replacing the driver's own text, which mostly described features aibox disables.
+
+### 新增
+
+- `aibox cu install` / `restart` 把 skill `aibox-mac` 装进 `~/.aibox/claude/skills/` 和 `~/.aibox/codex/skills/`。内容:什么时候用、标准流程、标准应用与自绘界面两类应用的操作方法、输入文字的坑、做了收不回的操作前怎么核对和什么时候先问用户、aibox 下用不了的工具和参数。
+- `references/apps.md` 收录真机验证过的经验(微信、网易云音乐、计算器),`references/troubleshooting.md` 列出每种拒绝和报错的应对,`references/local-notes.md` 由 agent 追加本机发现的新经验(升级不覆盖,卸载时有内容也保留)。
+- 注册时在 Claude Code 的 `settings.json` 里放行读取 skill 目录和编辑 `local-notes.md`,免得每次询问或在非交互模式下被拒。
+- `aibox cu doctor` 检查两边的 skill 是否为当前版本。
+
+### 变化
+
+- 网关注入的服务说明只保留几条要点并指向 skill;cua-driver 自带的说明(大多讲 aibox 下不可用的功能)不再透传。
+
+### 升级须知
+
+- 升级后运行 `aibox cu restart`,装上 skill 并刷新配置,然后重启正在运行的 Claude Code / Codex。
+
 ## [0.4.1] - 2026-10-30
 
 安全修复：Mac 应用控制能经已授权应用的菜单栏碰到苹果菜单和「服务」菜单。启用了 `aibox cu` 的用户请升级。

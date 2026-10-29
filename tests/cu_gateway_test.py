@@ -8,6 +8,7 @@
 import importlib.util
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -261,6 +262,67 @@ class TreeSanitizeTest(unittest.TestCase):
         kept = [e["element_index"] for e in res["structuredContent"]["elements"]]
         self.assertEqual(kept, [0, 1, 5])
         self.assertEqual(set(roles), {0, 1, 5})
+
+
+SKILL_SRC = os.path.join(ROOT, "computer-use", "skills", "aibox-mac")
+
+
+class SkillTest(unittest.TestCase):
+    def test_frontmatter_and_links(self):
+        with open(os.path.join(SKILL_SRC, "SKILL.md"), encoding="utf-8") as f:
+            text = f.read()
+        self.assertTrue(text.startswith("---\n"))
+        head = text.split("---\n")[1]
+        meta = dict(line.split(": ", 1) for line in head.strip().splitlines())
+        self.assertEqual(meta["name"], "aibox-mac")
+        self.assertTrue(0 < len(meta["description"]) <= 1024)
+        for link in re.findall(r"\]\((references/[^)]+)\)", text):
+            self.assertTrue(os.path.exists(os.path.join(SKILL_SRC, link)), link)
+
+    def test_install_update_uninstall(self):
+        d = tempfile.mkdtemp()
+        claude, codex = os.path.join(d, "claude"), os.path.join(d, "codex")
+        gw.register(claude, codex, SKILL_SRC)
+        with open(os.path.join(claude, "settings.json"), encoding="utf-8") as f:
+            allow = json.load(f)["permissions"]["allow"]
+        self.assertIn("Read(~/.claude/skills/aibox-mac/**)", allow)
+        self.assertIn("Read(/%s/skills/aibox-mac/**)" % os.path.abspath(claude), allow)
+        self.assertIn("Edit(~/.claude/skills/aibox-mac/references/local-notes.md)", allow)
+        for root in (claude, codex):
+            dest = os.path.join(root, "skills", "aibox-mac")
+            self.assertTrue(os.path.exists(os.path.join(dest, "SKILL.md")))
+            self.assertTrue(os.path.exists(os.path.join(dest, "references", "apps.md")))
+            self.assertTrue(os.path.exists(os.path.join(dest, gw.SKILL_MARK)))
+        # 本机记下的经验在重装 / 升级时保留
+        notes = os.path.join(claude, "skills", "aibox-mac", "references", "local-notes.md")
+        with open(notes, "a", encoding="utf-8") as f:
+            f.write("\n## 测试应用(com.example.app)— 2026-10-30\n- 记一条\n")
+        with open(os.path.join(claude, "skills", "aibox-mac", "SKILL.md"), "w") as f:
+            f.write("旧版本")
+        gw.register(claude, codex, SKILL_SRC)
+        with open(notes, encoding="utf-8") as f:
+            self.assertIn("记一条", f.read())
+        with open(os.path.join(claude, "skills", "aibox-mac", "SKILL.md"), encoding="utf-8") as f:
+            self.assertIn("name: aibox-mac", f.read())
+        # 卸载:记过经验的 local-notes.md 保留,其余删掉;没记过的整个删掉
+        gw.unregister(claude, codex, SKILL_SRC)
+        with open(os.path.join(claude, "settings.json"), encoding="utf-8") as f:
+            self.assertEqual(json.load(f)["permissions"]["allow"], [])
+        self.assertTrue(os.path.exists(notes))
+        self.assertFalse(os.path.exists(os.path.join(claude, "skills", "aibox-mac", "SKILL.md")))
+        self.assertFalse(os.path.exists(os.path.join(codex, "skills", "aibox-mac")))
+
+    def test_user_skill_untouched(self):
+        d = tempfile.mkdtemp()
+        dest = os.path.join(d, "skills", "aibox-mac")
+        os.makedirs(dest)
+        with open(os.path.join(dest, "SKILL.md"), "w") as f:
+            f.write("mine")
+        note = gw.install_skill(d, SKILL_SRC)
+        self.assertIn("未改动", note)
+        gw.uninstall_skill(d, SKILL_SRC)
+        with open(os.path.join(dest, "SKILL.md")) as f:
+            self.assertEqual(f.read(), "mine")
 
 
 class MethodTest(unittest.TestCase):

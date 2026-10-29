@@ -465,6 +465,7 @@ aibox cu status        # 应显示「正常」
 - **三层防护**：网关检查每次调用（工具、参数和 MCP 方法都是白名单；每个操作的目标 pid 必须属于本会话授权的应用；不开放前台模式和往宿主机写文件的参数），CuaDriver 以 bounded 模式只允许碰已授权的应用，屏幕录制和辅助功能权限只授给 `CuaDriver.app`。只认 `/Applications` 和系统目录里安装的应用。
 - **不需要重建镜像**：容器侧的转发器在启动容器时放进去。临时容器以环境变量拿到网关的 token 和端点；代理模式下防火墙只放行网关的这一个端口。
 - **急停**：`aibox cu off`。审计日志在 `~/Library/Logs/aibox-cu/audit.log`。
+- **配套 skill**：同时装上 skill `aibox-mac`（参照 Codex 的做法），教 agent 标准流程、两类应用的操作方法、做了收不回的操作前怎么核对，并收录微信、网易云音乐等应用的实测经验；agent 发现的新经验会记进本机的 `local-notes.md`。
 
 需要命令行工具（CLT）自带的 `/usr/bin/python3`。架构、安全模型、禁止清单、残留风险和排障见 [`computer-use/README.md`](computer-use/README.md)。
 

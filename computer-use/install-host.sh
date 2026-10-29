@@ -34,6 +34,8 @@ CU_DIR="$STATE_DIR/cu"
 CLIENT_DIR="$CU_DIR/client"
 DISABLED_MARK="$CU_DIR/disabled"
 GATEWAY="$PROG_DIR/computer-use/gateway.py"
+# 配套的 skill:教 agent 怎么用 mac 服务、各应用的经验;装进 Claude Code 和 Codex 的 skills 目录
+SKILL_SRC="$PROG_DIR/computer-use/skills/aibox-mac"
 PY=/usr/bin/python3
 LABEL="com.aibox.cu-gateway"
 PLIST_SRC="$SCRIPT_DIR/$LABEL.plist"
@@ -315,7 +317,8 @@ register_mcp() {
 	local line
 	while IFS= read -r line; do
 		ok "已写入 MCP 配置 —— $line"
-	done < <("$PY" "$GATEWAY" register --claude-dir "$STATE_DIR/claude" --codex-dir "$STATE_DIR/codex")
+	done < <("$PY" "$GATEWAY" register --claude-dir "$STATE_DIR/claude" --codex-dir "$STATE_DIR/codex" \
+		--skill-dir "$SKILL_SRC")
 }
 
 # ---- 子命令 ----
@@ -348,7 +351,7 @@ do_install() {
 	register_mcp
 	echo
 	echo "完成。接下来:"
-	info "重启正在运行的 Claude Code / Codex,它们会多出一个名为 mac 的 MCP 服务。"
+	info "重启正在运行的 Claude Code / Codex,它们会多出一个名为 mac 的 MCP 服务和配套的 skill aibox-mac。"
 	info "让 AI 操作某个应用时,它会先申请授权,Mac 上会弹出确认框(拒绝 / 仅本次会话 / 总是允许)。"
 	info "终端、IDE、浏览器、Finder、系统设置等被禁止控制;随时可用 aibox cu off 急停。"
 }
@@ -359,6 +362,8 @@ do_restart() {
 	rm -f "$DISABLED_MARK"
 	render_plist
 	load_agent
+	# 升级 aibox 后顺带刷新 MCP 配置和 skill
+	python_ok && register_mcp >/dev/null
 	if wait_listening; then
 		echo "网关已重新加载,监听 $(endpoint_host):$PORT"
 	else
@@ -393,8 +398,9 @@ do_uninstall() {
 	stop_driver_daemons
 	ok "网关已停止并移除"
 	if python_ok && [[ -f "$GATEWAY" ]]; then
-		"$PY" "$GATEWAY" unregister --claude-dir "$STATE_DIR/claude" --codex-dir "$STATE_DIR/codex"
-		ok "已从 Claude Code / Codex 的配置里移除 mac 服务"
+		"$PY" "$GATEWAY" unregister --claude-dir "$STATE_DIR/claude" --codex-dir "$STATE_DIR/codex" \
+			--skill-dir "$SKILL_SRC"
+		ok "已从 Claude Code / Codex 的配置里移除 mac 服务和 skill aibox-mac(记过经验的 local-notes.md 会保留)"
 	fi
 	if [[ -d "$CU_DIR" ]]; then
 		if ui_yn "删除 token 和「总是允许」的应用清单($(tilde "$CU_DIR"))?" Y; then
@@ -487,6 +493,17 @@ do_doctor() {
 	if [[ -s "$CLIENT_DIR/token" ]]; then ok "token 存在($(tilde "$CLIENT_DIR/token"))"; else bad "缺少 token:aibox cu install"; fi
 	if grep -q '"aibox-mac-mcp"' "$STATE_DIR/claude/.claude.json" 2>/dev/null; then ok "Claude Code 已注册 mac 服务"; else warn "Claude Code 未注册 mac 服务:aibox cu install"; fi
 	if grep -q '>>> aibox cu >>>' "$STATE_DIR/codex/config.toml" 2>/dev/null; then ok "Codex 已注册 mac 服务"; else warn "Codex 未注册 mac 服务:aibox cu install"; fi
+	for skill_root in "$STATE_DIR/claude" "$STATE_DIR/codex"; do
+		if [[ -f "$skill_root/skills/aibox-mac/SKILL.md" ]]; then
+			if cmp -s "$skill_root/skills/aibox-mac/SKILL.md" "$SKILL_SRC/SKILL.md"; then
+				ok "skill aibox-mac 已装到 $(tilde "$skill_root/skills")"
+			else
+				warn "$(tilde "$skill_root/skills")/aibox-mac 不是当前版本:aibox cu restart 刷新"
+			fi
+		else
+			warn "$(tilde "$skill_root/skills") 里没有 skill aibox-mac:aibox cu restart"
+		fi
+	done
 	if [[ -s "$LOG_DIR/gateway.log" ]]; then
 		echo
 		echo "  网关日志(末尾 5 行):"
