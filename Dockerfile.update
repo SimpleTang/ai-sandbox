@@ -18,11 +18,16 @@ FROM ${BASE_IMAGE}
 
 # 主镜像以 root 进入 entrypoint,由 entrypoint 完成防火墙后降权到 node。
 # npm install -g 同样需要 root;本增量层结束时必须保持 USER root。
+# 装完实际运行一次两个 CLI:平台包下载超时被 npm 静默跳过时,构建在这里失败,
+# $BASE_IMAGE 的标签保持原样,不会被一个只剩占位脚本的镜像顶替。
 USER root
 ARG NPM_SPECS
 RUN set -eux; \
     test -n "${NPM_SPECS}"; \
     npm config set registry https://registry.npmmirror.com; \
-    npm install -g ${NPM_SPECS}; \
-    npm config delete registry
+    npm install -g --fetch-timeout=1800000 --fetch-retries=5 ${NPM_SPECS}; \
+    npm config delete registry; \
+    HOME=/tmp/aibox-cli-check claude --version; \
+    HOME=/tmp/aibox-cli-check codex --version; \
+    rm -rf /tmp/aibox-cli-check
 USER root

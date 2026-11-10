@@ -210,6 +210,13 @@ stub_machine_cmd() {
             [ -z "${STUB_MACHINE_HOME:-}" ] || echo /home/dev
             return 0
             ;;
+        /usr/local/sbin/aibox-dev-tools)
+            # STUB_DEV_TOOLS_VERSION:机内 `aibox-dev-tools version` 的输出(含 backup 行)
+            if [ "${2:-}" = version ] && [ -n "${STUB_DEV_TOOLS_VERSION:-}" ]; then
+                printf '%b\n' "$STUB_DEV_TOOLS_VERSION"
+                return 0
+            fi
+            ;;
         pgrep)
             [ -n "${STUB_MACHINE_BUSY:-}" ]
             return $?
@@ -1062,8 +1069,39 @@ reset_stub_files
 printf 'y\n' | run_fixture_command update cc > "$TMP_ROOT/dev-update.output" 2>&1 \
     || fail "updating Claude in the persistent machine failed"
 assert_file_contains "$STUB_CALLS" \
-    'CALL machine run --name aibox-dev --root /usr/local/sbin/aibox-dev-tools update claude' \
-    "dev update did not target the machine-local Claude installation"
+    'CALL machine run --name aibox-dev --root /usr/local/sbin/aibox-dev-tools update claude@9.9.9' \
+    "dev update did not install the exact version it showed before asking"
+
+# 回退:先确认有上一版并展示「当前 -> 上一版」,确认后才执行
+reset_stub_files
+printf 'y\n' | run_fixture_command rollback cc > "$TMP_ROOT/dev-rollback-none.output" 2>&1 \
+    && fail "rollback without a saved previous version reported success"
+assert_file_contains "$TMP_ROOT/dev-rollback-none.output" '没有 claude 的上一版' \
+    "rollback without a saved previous version did not explain why"
+assert_file_omits "$STUB_CALLS" 'aibox-dev-tools rollback' \
+    "rollback ran in the machine although no previous version exists"
+
+reset_stub_files
+printf 'n\n' | STUB_DEV_TOOLS_VERSION='claude-code: 2.0.0\n  backup: 1.0.0' \
+    run_fixture_command rollback cc > "$TMP_ROOT/dev-rollback-cancel.output" 2>&1 \
+    || fail "cancelling a rollback failed"
+assert_file_contains "$TMP_ROOT/dev-rollback-cancel.output" '从 2.0.0 换回 1.0.0' \
+    "rollback did not show the current and previous versions before asking"
+assert_file_omits "$STUB_CALLS" 'aibox-dev-tools rollback' \
+    "rollback ran without confirmation"
+
+reset_stub_files
+printf 'y\n' | STUB_DEV_TOOLS_VERSION='claude-code: 2.0.0\n  backup: 1.0.0' \
+    run_fixture_command rollback cc > "$TMP_ROOT/dev-rollback.output" 2>&1 \
+    || fail "rolling back Claude in the persistent machine failed"
+assert_file_contains "$STUB_CALLS" \
+    'CALL machine run --name aibox-dev --root /usr/local/sbin/aibox-dev-tools rollback claude' \
+    "dev rollback did not target the machine-local Claude installation"
+
+run_fixture_command rollback > "$TMP_ROOT/dev-rollback-usage.output" 2>&1 \
+    && fail "rollback without a target was accepted"
+assert_file_contains "$TMP_ROOT/dev-rollback-usage.output" 'aibox rollback cc|codex' \
+    "rollback without a target did not print its usage"
 
 reset_stub_files
 run_fixture_command version codex > "$TMP_ROOT/dev-version.output" 2>&1 \
@@ -1312,10 +1350,17 @@ grep -qF 'exec /bin/bash -l' "$ROOT/dev-shell.sh" \
     || fail "development-machine login still depends on a custom PATH to find bash"
 grep -qF '/usr/local/sbin/aibox-dev-proxy-run' "$ROOT/aibox-dev-proxy.service" \
     || fail "development-machine proxy is not managed by systemd"
-grep -qF '@anthropic-ai/claude-code@latest' "$ROOT/dev-tools.sh" \
+grep -qF '@anthropic-ai/claude-code' "$ROOT/dev-tools.sh" \
     || fail "development-machine updater omits Claude Code"
-grep -qF '@openai/codex@latest' "$ROOT/dev-tools.sh" \
+grep -qF '@openai/codex' "$ROOT/dev-tools.sh" \
     || fail "development-machine updater omits Codex"
+# 平台包下载超时会被 npm 静默跳过、只留下占位脚本:镜像构建装完必须实际运行一次 CLI
+for dockerfile in Dockerfile Dockerfile.update; do
+    grep -qF 'claude --version' "$ROOT/$dockerfile" \
+        || fail "$dockerfile does not check that the installed Claude Code actually runs"
+    grep -qF 'codex --version' "$ROOT/$dockerfile" \
+        || fail "$dockerfile does not check that the installed Codex actually runs"
+done
 
 # The persistent machine releases cached virtiofs inodes (each pins a host file handle)
 # only once they pass the threshold; the drop is global and costs a little speed. The

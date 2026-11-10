@@ -123,13 +123,19 @@ RUN echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
 # 所以之后任何一次全量重建都复现相同版本。
 # npm 官方源在 builder 里可能同样解析不稳,改用淘宝镜像(通常不被污染)。
 # 注意:npm install -g 写 /usr/local,须以 root 执行。
+# CLI 本体在百余 MB 的平台包里,npm 下载它超时(默认 5 分钟)会当可选依赖静默跳过,
+# 只装上一个运行即报错的占位脚本、构建却显示成功。所以放宽超时,装完实际运行一次:
+# 跑不起来就让构建失败,原有镜像标签不会被替换。
 ARG CLAUDE_CODE_VERSION=2.1.233
 ARG CODEX_VERSION=0.147.0
 RUN npm config set registry https://registry.npmmirror.com \
-    && npm install -g \
+    && npm install -g --fetch-timeout=1800000 --fetch-retries=5 \
         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
         "@openai/codex@${CODEX_VERSION}" \
-    && npm config delete registry
+    && npm config delete registry \
+    && HOME=/tmp/aibox-cli-check claude --version \
+    && HOME=/tmp/aibox-cli-check codex --version \
+    && rm -rf /tmp/aibox-cli-check
 
 # ---- 入口脚本:初始化运行环境,按需启动 gost,再执行目标命令 ----
 # 特意放在 npm 层「之后」:entrypoint.sh 偶尔改动时不会连累重装两个 CLI;

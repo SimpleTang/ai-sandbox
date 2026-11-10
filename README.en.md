@@ -587,6 +587,7 @@ aibox start                   # create/start and refresh the proxy without a she
 aibox restart                 # restart and refresh the proxy service
 aibox exec <cmd> [args]       # run a command as the ordinary machine user
 aibox update [cc|codex]       # check for newer CLIs inside the machine; update after confirmation
+aibox rollback cc|codex       # switch back to the version before the last update
 aibox version [cc|codex]      # show versions actually installed in the machine
 aibox set memory=8G cpus=4    # change an existing machine's resources; takes effect after restart
 aibox stop                    # keep the persistent system disk
@@ -785,10 +786,22 @@ the old clone once everything works.
 The persistent container has its own writable system disk and does not change when its image is
 rebuilt, so its CLIs are upgraded in place. `aibox update`, optionally limited to `cc` or `codex`,
 first reads the versions installed in the machine, queries the npm mirror (npmmirror) for the latest
-ones, prints `current -> latest` for each, and asks `[y/N]` before installing anything. If nothing
-is newer, it simply exits. The install uses the machine's local gost service when a proxy is
-configured and does not change the temporary-container image's version pins. `aibox version
-[cc|codex]` shows the versions actually installed in the machine.
+ones, prints `current -> latest` for each, and asks `[y/N]` before installing exactly the version
+it showed. If nothing is newer, it simply exits. It does not change the temporary-container image's
+version pins. `aibox version [cc|codex]` shows the versions actually installed in the machine, plus
+a `backup:` line when a previous version is kept.
+
+An update never breaks the working version. Package files are downloaded with curl (with a progress
+bar in a terminal, resumable) and checked against the registry's sha512. Routes are tried in order:
+direct to npmjs, direct to npmmirror, then npmmirror and npmjs through the proxy, moving on when a
+route fails or stays below 64 KB/s for 30 seconds. "Direct" uses the Mac's own network; the
+`AIBOX_PROXY` exit is meant for AI services and is not needed for public npm packages. The new
+version is unpacked into a staging directory and must report the expected version from `--version`
+before it replaces the installed one; it is run again after the swap and swapped back if that fails.
+The replaced version is kept in `/usr/local/lib/aibox-cli-backup/` (one per CLI), and
+`aibox rollback cc|codex` swaps it back; running it again returns to the newer one. A plain
+`npm install -g` is not used because npm silently skips the 100+ MB platform package when its
+download times out, leaving a stub that only prints "claude native binary not installed".
 
 Temporary containers use the base image, so `aibox tmp update [cc|codex]` updates the image. It
 checks the npm mirror, shows the pinned and latest versions, asks for confirmation, and records the

@@ -4,6 +4,32 @@
 
 `aibox --version` 显示当前安装的版本。
 
+## [0.4.3] - 2026-11-10
+
+修复:长期容器里 `aibox update` 可能把能用的 Claude Code 换成一个跑不起来的占位脚本。
+
+English summary: `aibox update` in the persistent container could replace a working Claude Code with a stub that only prints "claude native binary not installed": npm silently skips the 100+ MB platform package when its download times out (5 minutes by default; downloads through the proxy ran at about 0.4 MB/s). Updates now download with curl (progress bar, resumable, sha512-checked), prefer the Mac's direct network over the AI proxy, install into a staging directory, run `--version` before and after the swap, and keep the replaced version for the new `aibox rollback cc|codex`. Image builds for temporary containers now fail instead of tagging an image whose CLI cannot run.
+
+### 修复
+
+- 长期容器的 `aibox update`:平台包(claude 约 160 MB)下载超时后被 npm 当作可选依赖静默跳过,只剩占位脚本,且直接覆盖了原来能用的版本。现在改为自己下载并校验,新版在暂存目录装好、实际运行确认是目标版本后才替换;替换后再验一次,不对立即换回。任何一步失败,正在用的版本都不受影响。
+- `aibox tmp update` / `aibox tmp build`:装完 CLI 实际运行一次,跑不起来就让构建失败,原镜像标签不会被替换;npm 的下载超时放宽到 30 分钟并重试 5 次。
+
+### 新增
+
+- `aibox rollback cc|codex`:换回更新前的上一版(每个 CLI 保留一份,在 `/usr/local/lib/aibox-cli-backup/`),再执行一次即换回。`aibox version` 有可回退版本时显示 `backup:` 行。
+- `aibox update` 下载显示进度条,中断后重跑可续传。
+
+### 变化
+
+- `aibox update` 下载线路依次为:直连 npmjs → 直连 npmmirror → 经代理 npmmirror → 经代理 npmjs,连不上或 30 秒内持续低于 64 KB/s 就换下一条。之前固定经 `AIBOX_PROXY` 访问 npmmirror,实测约 0.4 MB/s;直连 npmjs 约 20 MB/s。
+- `aibox update` 安装的是确认时显示的确切版本,不再是安装那一刻的 `latest`。
+
+### 升级须知
+
+- `brew upgrade aibox` 后无需额外操作:下次运行 `aibox` 时新的升级脚本自动同步进长期容器。
+- 如果之前的 `aibox update` 已经留下占位脚本(启动 claude 报 `claude native binary not installed`),升级 aibox 后运行 `aibox exec sudo aibox-dev-tools update claude` 重装最新版(`aibox update cc` 看到版本号相同会显示「已是最新」,不会重装)。
+
 ## [0.4.2] - 2026-10-30
 
 Mac 应用控制新增配套的 skill `aibox-mac`,参照 Codex 的 Computer Use 插件(MCP 服务 + skill)。

@@ -10,7 +10,8 @@
 #   ai-box codex [/path]        # 进入长期容器并直接启动 codex
 #   ai-box start | restart      # 创建/启动或重启长期容器并刷新代理,不进入 shell
 #   ai-box exec <cmd...>        # 在长期容器内以普通用户执行命令
-#   ai-box update [cc|codex]    # 检查长期容器内 CLI 新版,确认后更新
+#   ai-box update [cc|codex]    # 检查长期容器内 CLI 新版,确认后更新(装好并实测通过才替换)
+#   ai-box rollback cc|codex    # 换回更新前的上一版(再执行一次即换回)
 #   ai-box version [cc|codex]   # 显示长期容器内实际 CLI 版本
 #   ai-box set memory=8G cpus=4 # 调整资源(重启后生效)
 #   ai-box stop | logs [-f]     # 停止(保留系统盘) / 查看日志
@@ -52,7 +53,7 @@
 set -euo pipefail
 
 # aibox 自身的版本。发版时与 CHANGELOG.md 的条目和 git tag(v<版本>)保持一致。
-AIBOX_VERSION="0.4.2"
+AIBOX_VERSION="0.4.3"
 
 IMAGE="ai-sandbox:latest"
 DEV_IMAGE="ai-sandbox-dev:latest"
@@ -260,7 +261,9 @@ aibox —— apple/container 沙箱里的 Claude Code / Codex,可按需配置上
   aibox start                  创建/启动并刷新代理,不进入 shell
   aibox restart                重启并刷新代理服务
   aibox exec <cmd...>          以普通用户在长期容器内执行命令
-  aibox update [cc|codex]      检查长期容器内 CLI 新版,确认后更新(不带参两个都查)
+  aibox update [cc|codex]      检查长期容器内 CLI 新版,确认后更新(不带参两个都查;
+                               新版装好并实测能运行才替换,失败时原版本不动)
+  aibox rollback cc|codex      换回更新前的上一版(再执行一次即换回)
   aibox version [cc|codex]     显示长期容器内实际 CLI 版本
   aibox set memory=8G cpus=4   调整资源(重启后生效)
   aibox stop                   停止,保留系统盘
@@ -490,7 +493,7 @@ if [[ "$AIBOX_MODE" == "tmp" && "${1:-}" == "update" ]]; then
             echo "    注:增量更新会给镜像叠加新层,多次更新后可用 aibox tmp build 全量重建压平。"
             exit 0
         fi
-        echo "==> 增量构建失败(可能 builder 不支持本地镜像作基础镜像,或网络问题)。" >&2
+        echo "==> 增量构建失败(可能 builder 不支持本地镜像作基础镜像、网络问题,或装上的 CLI 无法运行);原镜像未改动。" >&2
         if ! ui_yn "回退全量构建?(较慢,会重下所有依赖)" N; then
             echo "==> 已跳过构建。新版本已记录,稍后可用 aibox tmp build 全量构建生效。"
             exit 1
@@ -1105,6 +1108,15 @@ if [[ "$AIBOX_MODE" == "dev" ]]; then
             AIBOX_DEV_ACTION="exec"
             AIBOX_DEV_COMMAND=("${@:2}")
             ;;
+        rollback)
+            case "${2:-}" in
+                cc|claude) AIBOX_DEV_TARGET="claude" ;;
+                codex)     AIBOX_DEV_TARGET="codex" ;;
+                *) echo "用法: aibox rollback cc|codex" >&2; exit 2 ;;
+            esac
+            [[ $# -eq 2 ]] || { echo "用法: aibox rollback cc|codex" >&2; exit 2; }
+            AIBOX_DEV_ACTION="rollback"
+            ;;
         update|version)
             [[ $# -le 2 ]] || { echo "用法: aibox $dev_action [cc|codex]" >&2; exit 2; }
             case "${2:-}" in
@@ -1677,7 +1689,7 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
     fi
 
     case "$AIBOX_DEV_ACTION" in
-        restart|exec|update|version)
+        restart|exec|update|version|rollback)
             aibox_dev_require_exists || exit 1
             ;;
     esac
@@ -1878,7 +1890,7 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
             # 与 aibox tmp update 同一交互:先列出「当前 -> 最新」,确认后才安装
             if [[ "$AIBOX_DEV_TARGET" == "all" ]]; then dev_targets="claude codex"; else dev_targets="$AIBOX_DEV_TARGET"; fi
             echo "==> 检查更新(版本源: npmmirror,与长期容器内安装同源)"
-            dev_updates=""
+            dev_updates=""    # 本次要装的确切版本,如 "claude@2.1.322 codex@0.158.0"
             for t in $dev_targets; do
                 cur="$(container machine run --name "$DEV_MACHINE_NAME" \
                     /usr/local/sbin/aibox-dev-tools version "$t" 2>/dev/null \
@@ -1893,7 +1905,7 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
                     echo "    $t: $cur(已是最新)"
                 else
                     echo "    $t: ${cur:-未安装} -> $new"
-                    dev_updates="${dev_updates:+$dev_updates }$t"
+                    dev_updates="${dev_updates:+$dev_updates }$t@$new"
                 fi
             done
             dev_status=0
@@ -1903,15 +1915,37 @@ if [[ -n "$AIBOX_DEV_ACTION" ]]; then
                 if ! ui_yn "确认更新以上版本?" N; then
                     echo "==> 已取消,长期容器未改动。"
                 else
-                    [[ "$dev_updates" == *" "* ]] && dev_updates="all"
                     echo "==> 升级长期容器内的 AI CLI: $dev_updates"
-                    if container machine run --name "$DEV_MACHINE_NAME" --root \
-                        /usr/local/sbin/aibox-dev-tools update "$dev_updates"; then
+                    # 装的是上面确认过的确切版本;有终端时开 tty,下载才显示进度条
+                    dev_tty=()
+                    [[ -t 0 && -t 1 ]] && dev_tty=(--interactive --tty)
+                    # shellcheck disable=SC2086  # dev_updates 是空格分隔的多个参数
+                    if container machine run ${dev_tty[@]+"${dev_tty[@]}"} --name "$DEV_MACHINE_NAME" --root \
+                        /usr/local/sbin/aibox-dev-tools update $dev_updates; then
                         dev_status=0
                     else
                         dev_status=$?
+                        echo "==> 有 CLI 更新失败(见上方错误);失败的那个仍是原版本,没有被改动。" >&2
                     fi
                 fi
+            fi
+            ;;
+        rollback)
+            dev_ver_out="$(container machine run --name "$DEV_MACHINE_NAME" \
+                /usr/local/sbin/aibox-dev-tools version "$AIBOX_DEV_TARGET" 2>/dev/null)" || dev_ver_out=""
+            cur="$(printf '%s\n' "$dev_ver_out" | sed -n 's/^[a-z-]*:[[:space:]]*//p' | head -n 1)"
+            prev="$(printf '%s\n' "$dev_ver_out" | sed -n 's/^  backup:[[:space:]]*//p' | head -n 1)"
+            dev_status=0
+            if [[ -z "$prev" ]]; then
+                echo "==> 长期容器内没有 $AIBOX_DEV_TARGET 的上一版可回退(用 aibox update 更新过才会保留一份)。" >&2
+                dev_status=1
+            elif ! ui_yn "把 $AIBOX_DEV_TARGET 从 ${cur:-未安装} 换回 ${prev}?" N; then
+                echo "==> 已取消,长期容器未改动。"
+            elif container machine run --name "$DEV_MACHINE_NAME" --root \
+                /usr/local/sbin/aibox-dev-tools rollback "$AIBOX_DEV_TARGET"; then
+                dev_status=0
+            else
+                dev_status=$?
             fi
             ;;
         version)

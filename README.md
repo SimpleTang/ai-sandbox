@@ -372,6 +372,7 @@ aibox start                           # 创建/启动并刷新代理，不进入
 aibox restart                         # 重启并刷新代理服务
 aibox exec <command> [args...]        # 以普通用户在长期容器内执行命令
 aibox update [cc|codex]               # 检查机内 CLI 新版，确认后更新
+aibox rollback cc|codex               # 换回更新前的上一版
 aibox version [cc|codex]              # 查看机内实际安装的 CLI 版本
 aibox set memory=8G cpus=4            # 调整已创建的长期容器的资源，restart 后生效
 aibox stop                            # 停止，保留系统盘
@@ -507,9 +508,18 @@ aibox cu restart                   # 启用过 Mac 应用控制时，换上新�
 aibox update           # Claude Code 和 Codex
 aibox update cc        # 仅 Claude Code
 aibox update codex     # 仅 Codex
+aibox rollback cc      # 把 Claude Code 换回更新前的上一版（再执行一次即换回）
 ```
 
-`aibox update` 先读取长期容器里已安装的版本，再从 npm 镜像（npmmirror）查询最新版本，逐个显示 `当前 -> 最新`，等待 `[y/N]` 确认后才在机内安装；没有可用更新时直接结束。安装使用机内本地 gost 代理（如已配置），不改动临时容器镜像的版本钉。`aibox version [cc|codex]` 显示机内实际安装的版本。
+`aibox update` 先读取长期容器里已安装的版本，再从 npm 镜像（npmmirror）查询最新版本，逐个显示 `当前 -> 最新`，等待 `[y/N]` 确认后才在机内安装上面显示的那个确切版本；没有可用更新时直接结束。不改动临时容器镜像的版本钉。`aibox version [cc|codex]` 显示机内实际安装的版本，有可回退的上一版时另起一行显示 `backup:`。
+
+安装过程不会弄坏正在用的版本：
+
+- **下载**：包文件由 curl 下载，在终端里运行时显示进度条；按 registry 登记的 sha512 校验。线路依次尝试直连 npmjs、直连 npmmirror、经代理 npmmirror、经代理 npmjs，连不上或持续过慢（30 秒低于 64 KB/s）就换下一条。「直连」走宿主机的网络出口；`AIBOX_PROXY` 用来给 AI 服务固定出口 IP，下载公开的 npm 包不经过它（经海外代理绕回国内镜像实测只有约 0.4 MB/s）。下载中断后重跑会接着下。
+- **先验证再替换**：新版先装进暂存目录，实际运行一次 `--version` 确认是目标版本，通过后才替换正在用的那份；替换后再运行一次，不对立即换回。任何一步失败都只报错，正在运行和下次启动的都还是原版本。
+- **回退**：被替换下来的旧版在 `/usr/local/lib/aibox-cli-backup/` 里留一份（每个 CLI 一份，约 200–400 MB）。新版有问题时运行 `aibox rollback cc|codex` 换回，再执行一次又换回新版。
+
+之所以不直接 `npm install -g`：CLI 的本体在百余 MB 的平台包里，npm 下载它超时（默认 5 分钟）时会把它当作可选依赖静默跳过，只装上一个运行即报 `claude native binary not installed` 的占位脚本，并且直接覆盖在原来能用的那份上。
 
 临时容器使用基础镜像，更新的是镜像：
 
